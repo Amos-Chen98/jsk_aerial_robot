@@ -113,3 +113,5 @@ tags
 *acados_ocp.json
 *acados_sim.json
 *model.json
+
+.vscode/
