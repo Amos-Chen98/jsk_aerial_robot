@@ -23,7 +23,7 @@ find_package(NLopt REQUIRED)
 
 catkin_package(
   INCLUDE_DIRS include test
-  LIBRARIES dragon_robot_model dragon_aerial_robot_controllib dragon_navigation dragon_numerical_jacobians
+  LIBRARIES dragon_robot_model dragon_aerial_robot_controllib dragon_navigation dragon_copilot dragon_numerical_jacobians
   CATKIN_DEPENDS   aerial_robot_control aerial_robot_model aerial_robot_msgs hydrus pluginlib roscpp
 )
 
@@ -54,6 +54,9 @@ add_dependencies(dragon_aerial_robot_controllib aerial_robot_msgs_generate_messa
 add_library(dragon_navigation src/dragon_navigation.cpp)
 target_link_libraries(dragon_navigation ${catkin_LIBRARIES})
 
+add_library(dragon_copilot src/dragon_copilot.cpp)
+target_link_libraries(dragon_copilot dragon_navigation ${catkin_LIBRARIES})
+
 # generate symbolic link for desktop files
 add_custom_target(${PROJECT_NAME}_install_desktop ALL COMMAND ${PROJECT_SOURCE_DIR}/bin/desktop/desktop_install.sh)
 
@@ -72,7 +75,7 @@ install(TARGETS dragon_jacobian_test
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
-install(TARGETS dragon_sensor_pluginlib dragon_robot_model dragon_aerial_robot_controllib dragon_navigation dragon_numerical_jacobians
+install(TARGETS dragon_sensor_pluginlib dragon_robot_model dragon_aerial_robot_controllib dragon_navigation dragon_copilot dragon_numerical_jacobians
   DESTINATION ${CATKIN_PACKAGE_LIB_DESTINATION}
 )
 
