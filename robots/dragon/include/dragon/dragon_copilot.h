@@ -35,67 +35,54 @@
 
 #pragma once
 
-#include <aerial_robot_control/flight_navigation.h>
-#include <geometry_msgs/Vector3Stamped.h>
-#include <geometry_msgs/QuaternionStamped.h>
-#include <kdl_conversions/kdl_msg.h>
-#include <sensor_msgs/JointState.h>
-#include <nav_msgs/Odometry.h>
-#include <spinal/DesireCoord.h>
+#include <dragon/dragon_navigation.h>
 
 namespace aerial_robot_navigation
 {
-  class DragonNavigator : public BaseNavigator
+  class DragonCopilot : public DragonNavigator
   {
   public:
-    DragonNavigator();
-    ~DragonNavigator(){}
+    DragonCopilot();
+    ~DragonCopilot(){}
 
     void initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
                     boost::shared_ptr<aerial_robot_model::RobotModel> robot_model,
                     boost::shared_ptr<aerial_robot_estimation::StateEstimator> estimator,
                     double loop_du) override;
 
-    void update() override;
-
-    inline const bool getEqCoGWorldFlag() const { return eq_cog_world_; }
-
-  protected:
-    ros::Publisher target_baselink_rpy_pub_; // to spinal
-    ros::Publisher joint_control_pub_;
-    ros::Subscriber final_target_baselink_rot_sub_, final_target_baselink_rpy_sub_;
-    ros::Subscriber target_rotation_motion_sub_;
-
-    void halt() override;
-    void reset() override;
-
-    void servoTorqueProcess();
-    void landingProcess();
-    void gimbalControl();
-    void baselinkRotationProcess();
+  private:
+    /**
+     * @brief Override joystick control with custom mapping for copilot mode
+     * 
+     * Custom mapping (works with any supported controller via joyParse):
+     * - R2 trigger (JOY_AXIS_BUTTON_REAR_RIGHT_2): Forward movement along x-axis
+     * - L2 trigger (JOY_AXIS_BUTTON_REAR_LEFT_2): Backward movement along x-axis
+     * - Left stick horizontal (JOY_AXIS_STICK_LEFT_LEFTWARDS): Yaw rotation
+     * - Left stick vertical (JOY_AXIS_STICK_LEFT_UPWARDS): Pitch attitude control
+     * - Right stick horizontal (JOY_AXIS_STICK_RIGHT_LEFTWARDS): Lateral translation (left/right)
+     * - Right stick vertical (JOY_AXIS_STICK_RIGHT_UPWARDS): Vertical translation (up/down)
+     * 
+     * Supported controllers: PS3, PS4, Bluetooth (BLT), ROG1
+     */
+    void joyStickControl(const sensor_msgs::JoyConstPtr & joy_msg) override;
+    
     void rosParamInit() override;
 
-    void targetBaselinkRotCallback(const geometry_msgs::QuaternionStampedConstPtr & msg);
-    void targetBaselinkRPYCallback(const geometry_msgs::Vector3StampedConstPtr & msg);
-    void targetRotationMotionCallback(const nav_msgs::OdometryConstPtr& msg);
-
-    /* target baselink rotation */
-    double prev_rotation_stamp_;
-    std::vector<double> target_gimbal_angles_;
-    tf::Quaternion curr_target_baselink_rot_, final_target_baselink_rot_;
-    bool eq_cog_world_;
-
-    /* landing process */
-    bool level_flag_;
-    bool servo_torque_;
-
-    /* rosparam */
-    double height_thresh_;
-    string joints_torque_control_srv_name_, gimbals_torque_control_srv_name_;
-    double baselink_rot_change_thresh_;
-    double baselink_rot_pub_interval_;
-
-    // addtional state 
-    static constexpr uint8_t PRE_LAND_STATE = 0x20;
+    /* copilot specific parameters */
+    double max_copilot_x_vel_;        // maximum forward/backward velocity
+    double max_copilot_y_vel_;        // maximum lateral velocity
+    double max_copilot_z_vel_;        // maximum vertical velocity
+    double max_copilot_yaw_vel_;      // maximum yaw angular velocity
+    double max_copilot_pitch_angle_;  // maximum pitch angle for attitude control
+    
+    double trigger_deadzone_;         // deadzone for L2/R2 triggers
+    
+    /* trigger initialization tracking */
+    bool r2_trigger_initialized_;     // true after R2 has been pressed at least once
+    bool l2_trigger_initialized_;     // true after L2 has been pressed at least once
+    
+    /* attitude hold when no joystick input */
+    double last_commanded_pitch_;     // last pitch angle when there was joystick input
+    bool hold_attitude_on_idle_;      // flag to enable attitude hold when no input (default: true)
   };
 };

@@ -1,5 +1,13 @@
-<library path="lib/libdragon_navigation">
-  <class name="aerial_robot_navigation/dragon_navigation" type="aerial_robot_navigation::DragonNavigator" base_class_type="aerial_robot_navigation::BaseNavigator">
-    <description> dragon navigation plugin</description>
-  </class>
-</library>
+<class_libraries>
+  <library path="lib/libdragon_navigation">
+    <class name="aerial_robot_navigation/dragon_navigation" type="aerial_robot_navigation::DragonNavigator" base_class_type="aerial_robot_navigation::BaseNavigator">
+      <description> dragon navigation plugin</description>
+    </class>
+  </library>
+
+  <library path="lib/libdragon_copilot">
+    <class name="aerial_robot_navigation/dragon_copilot" type="aerial_robot_navigation::DragonCopilot" base_class_type="aerial_robot_navigation::BaseNavigator">
+      <description> dragon copilot navigation plugin with custom joystick mapping</description>
+    </class>
+  </library>
+</class_libraries>
