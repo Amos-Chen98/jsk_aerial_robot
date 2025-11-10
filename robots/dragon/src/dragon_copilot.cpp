@@ -1,5 +1,6 @@
 #include <dragon/dragon_copilot.h>
 #include <aerial_robot_control/util/joy_parser.h>
+#include <tf_conversions/tf_kdl.h>
 
 using namespace aerial_robot_model;
 using namespace aerial_robot_navigation;
@@ -140,6 +141,17 @@ void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
   if (!teleop_flag_)
     return;
 
+  /* Parse joystick inputs to get velocity and attitude commands */
+  RootFrameCommand cmd = parseJoystickInputs(joy_cmd);
+
+  /* Transform velocity commands and set control targets */
+  transformAndSetControlTargets(cmd);
+}
+
+RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_cmd)
+{
+  RootFrameCommand cmd;
+  // ---------- X-axis control (forward/backward) via R2/L2 triggers ----------
   // R2 trigger: forward (neutral=+1, full=-1, so we need to invert and normalize)
   // Handle initialization issue: ROS topic reports 0 until first press, then reports correctly
   double raw_r2 = 1.0;  // Default to neutral position
@@ -176,26 +188,12 @@ void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
     raw_l2 = l2_value;
   }
 
-  // Left stick horizontal: yaw rotation
-  double raw_yaw_cmd = joy_cmd.axes[JOY_AXIS_STICK_LEFT_LEFTWARDS];
-  // Left stick vertical: pitch attitude
-  double raw_pitch_cmd = joy_cmd.axes[JOY_AXIS_STICK_LEFT_UPWARDS];
-
-  // Right stick horizontal: lateral translation (y-axis)
-  double raw_y_cmd = joy_cmd.axes[JOY_AXIS_STICK_RIGHT_LEFTWARDS];
-  // Right stick vertical: vertical translation (z-axis)
-  double raw_z_cmd = joy_cmd.axes[JOY_AXIS_STICK_RIGHT_UPWARDS];
-
-  /* Process X-axis motion (forward/backward) from triggers */
-  // Convert trigger values: neutral(+1) -> 0, full(-1) -> max_vel
-  // Forward movement (R2): positive x velocity
   double forward_cmd = 0.0;
   if (raw_r2 < (1.0 - trigger_deadzone_))
   {
     forward_cmd = (1.0 - raw_r2) / 2.0;  // normalize to [0, 1]
   }
 
-  // Backward movement (L2): negative x velocity
   double backward_cmd = 0.0;
   if (raw_l2 < (1.0 - trigger_deadzone_))
   {
@@ -203,106 +201,174 @@ void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
   }
 
   // Calculate net x velocity command
-  double x_vel_cmd = (forward_cmd - backward_cmd) * max_copilot_x_vel_;
+  // R2 (forward_cmd) -> positive X velocity (root frame forward direction)
+  // L2 (backward_cmd) -> negative X velocity (root frame backward direction)
+  cmd.x_vel = (forward_cmd - backward_cmd) * max_copilot_x_vel_;
+
+  // ---------- Y-axis control via JOY_AXIS_STICK_RIGHT ----------
+  // Right stick horizontal: lateral translation (y-axis)
+  double raw_y_cmd = joy_cmd.axes[JOY_AXIS_STICK_RIGHT_LEFTWARDS];
 
   /* Process Y-axis motion (lateral translation) */
-  double y_vel_cmd = 0.0;
   if (fabs(raw_y_cmd) > joy_stick_deadzone_)
   {
-    y_vel_cmd = raw_y_cmd * max_copilot_y_vel_;
+    cmd.y_vel = raw_y_cmd * max_copilot_y_vel_;
   }
+
+  // ---------- Z-axis control via JOY_AXIS_STICK_RIGHT ----------
+  // Right stick vertical: vertical translation (z-axis)
+  double raw_z_cmd = joy_cmd.axes[JOY_AXIS_STICK_RIGHT_UPWARDS];
 
   /* Process Z-axis motion (vertical translation) */
-  double z_vel_cmd = 0.0;
   if (fabs(raw_z_cmd) > joy_stick_deadzone_)
   {
-    z_vel_cmd = raw_z_cmd * max_copilot_z_vel_;
+    cmd.z_vel = raw_z_cmd * max_copilot_z_vel_;
   }
 
-  /* Process Yaw motion (rotation around z-axis) */
-  double yaw_vel_cmd = 0.0;
-  if (fabs(raw_yaw_cmd) > joy_stick_deadzone_)
-  {
-    yaw_vel_cmd = raw_yaw_cmd * max_copilot_yaw_vel_;
-  }
+  // ---------- pitch control via JOY_AXIS_STICK_LEFT ----------
+  // Left stick vertical: pitch attitude
+  double raw_pitch_cmd = joy_cmd.axes[JOY_AXIS_STICK_LEFT_UPWARDS];
 
   /* Process Pitch attitude control */
-  double pitch_cmd = 0.0;
   bool has_pitch_input = false;
 
   if (fabs(raw_pitch_cmd) > joy_stick_deadzone_)
   {
-    pitch_cmd = raw_pitch_cmd * max_copilot_pitch_angle_;
+    cmd.pitch = raw_pitch_cmd * max_copilot_pitch_angle_;
     has_pitch_input = true;
   }
   else if (hold_attitude_on_idle_)
   {
     // When no input and attitude hold is enabled, use last commanded pitch
-    pitch_cmd = last_commanded_pitch_;
+    cmd.pitch = last_commanded_pitch_;
   }
-  // else: pitch_cmd remains 0.0 (level flight)
+  // else: cmd.pitch remains 0.0 (level flight) from constructor
 
   // Update last commanded pitch if there was input
   if (has_pitch_input)
   {
-    last_commanded_pitch_ = pitch_cmd;
+    last_commanded_pitch_ = cmd.pitch;
   }
 
-  /* Transform velocity commands to world frame */
-  // Strategy:
-  // - R2/L2 (x-axis) and right stick horizontal (y-axis): follow body orientation (including pitch)
-  //   This means forward/backward motion will climb/descend when body is pitched
-  // - Right stick vertical (z-axis): adds pure vertical velocity in world frame
-  //   This allows independent altitude control regardless of body attitude
+  // ---------- yaw control via JOY_AXIS_STICK_LEFT ----------
+  // Left stick horizontal: yaw rotation
+  double raw_yaw_cmd = joy_cmd.axes[JOY_AXIS_STICK_LEFT_LEFTWARDS];
 
-  // Get current body orientation
-  tf::Quaternion body_orientation;
-  estimator_->getOrientation(Frame::BASELINK, estimate_mode_).getRotation(body_orientation);
-  tf::Matrix3x3 rot_mat(body_orientation);
+  /* Process Yaw motion (rotation around z-axis) */
+  if (fabs(raw_yaw_cmd) > joy_stick_deadzone_)
+  {
+    cmd.yaw_vel = raw_yaw_cmd * max_copilot_yaw_vel_;
+  }
 
-  // Transform x-y velocity in body frame (follows body pitch and yaw)
-  // Note: z component is 0 in body frame for R2/L2 and lateral stick
-  tf::Vector3 body_vel_xy(x_vel_cmd, y_vel_cmd, 0);
-  tf::Vector3 world_vel_xy = rot_mat * body_vel_xy;
+  // Finally, revert x and y axis, so that the forward on joystick means forward along the head direction
+  cmd.x_vel = -cmd.x_vel;
+  cmd.y_vel = -cmd.y_vel;
+  cmd.pitch = -cmd.pitch;
 
-  /* Set velocity targets in world frame */
-  // Combine body-frame transformed x-y with world-frame z
-  setTargetVelX(world_vel_xy.x());
-  setTargetVelY(world_vel_xy.y());
-  setTargetVelZ(world_vel_xy.z() + z_vel_cmd);  // Body z component + world frame z command
+  return cmd;
+}
 
-  /* Set angular velocity target (yaw) */
-  setTargetOmegaZ(yaw_vel_cmd);
+void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& cmd)
+{
+  /* Transform velocity commands from root frame to CoG velocity targets */
+  // - Root frame: the first link of the robot (link1 in Dragon URDF), what the user wants to control
+  // - Baselink frame: the FC (flight controller) frame, what the controller uses
+  // - CoG: center of gravity, what the controller actually tracks
 
-  /* Set pitch attitude target through baselink rotation */
-  // Get current baselink rotation
-  tf::Vector3 current_rpy;
-  double r, p, y;
-  tf::Matrix3x3(curr_target_baselink_rot_).getRPY(r, p, y);
+  // ===== Step 1: Get all necessary frames using KDL and TF =====
+  const KDL::JntArray& joint_positions = robot_model_->getJointPositions();
 
-  // Update pitch target
-  double target_pitch = pitch_cmd;
+  KDL::Frame world_to_cog;  // CoG frame in world coordinates {}^{world}T_{cog}
+  tf::poseTFToKDL(tf::Pose(tf::Transform(estimator_->getOrientation(Frame::COG, estimate_mode_),
+                                         estimator_->getPos(Frame::COG, estimate_mode_))),
+                  world_to_cog);
 
-  // Smooth pitch command to avoid abrupt changes
-  double pitch_diff = target_pitch - p;
+  KDL::Frame world_to_baselink;
+  tf::poseTFToKDL(tf::Pose(tf::Transform(estimator_->getOrientation(Frame::BASELINK, estimate_mode_),
+                                         estimator_->getPos(Frame::BASELINK, estimate_mode_))),
+                  world_to_baselink);
+
+  KDL::Frame root_to_baselink = robot_model_->forwardKinematics<KDL::Frame>("fc", joint_positions);
+
+  KDL::Frame baselink_to_root = root_to_baselink.Inverse();
+
+  KDL::Frame world_to_root = world_to_baselink * baselink_to_root;
+
+  // ===== Step 2: get desired root vel and omega in world frame =====
+
+  KDL::Vector root_vel_body(cmd.x_vel, cmd.y_vel, 0.0);
+
+  KDL::Vector des_root_vel_world = world_to_root.M * root_vel_body;
+
+  KDL::Vector root_omega_body(0.0, 0.0, cmd.yaw_vel);
+
+  KDL::Vector des_root_omega_world = world_to_root.M * root_omega_body;
+
+  // ===== Step 3: get desired CoG vel and omega in world frame =====
+
+  // Position offset from root to CoG in world frame
+  KDL::Vector root_to_cog_offset_world = world_to_cog.p - world_to_root.p;
+
+  // Velocity contribution from rotation: omega x r
+  KDL::Vector vel_from_rotation = des_root_omega_world * root_to_cog_offset_world;  // KDL Vector cross product operator
+
+  // Final CoG velocity: v_cog = v_root + omega x (r_cog - r_root)
+  KDL::Vector des_cog_vel_world = des_root_vel_world + vel_from_rotation;
+
+  // ===== Step 4: Set velocity targets =====
+
+  setTargetVelX(des_cog_vel_world.x());
+  setTargetVelY(des_cog_vel_world.y());
+  setTargetVelZ(des_cog_vel_world.z() + cmd.z_vel);  // Add world frame z command
+
+  setTargetOmegaZ(des_root_omega_world.z());
+
+  // ===== Step 5: Set pitch attitude target using rotation matrices =====
+
+  // Get current root yaw in world frame
+  double root_r, root_p, root_y;
+  world_to_root.M.GetRPY(root_r, root_p, root_y);
+
+  // Construct desired root orientation in world frame
+  // Keep current yaw, apply commanded pitch, zero roll (level flight)
+  KDL::Rotation des_world_to_root_rotation = KDL::Rotation::RPY(0.0, cmd.pitch, root_y);
+
+  // Calculate desired baselink orientation using rotation composition:
+  // {}^{world}R_{baselink} = {}^{world}R_{root} * {}^{root}R_{baselink}
+  KDL::Rotation des_world_to_baselink_rotation = des_world_to_root_rotation * root_to_baselink.M;
+
+  // Extract RPY from desired baselink rotation
+  double des_baselink_r, des_baselink_p, des_baselink_y;
+  des_world_to_baselink_rotation.GetRPY(des_baselink_r, des_baselink_p, des_baselink_y);
+
+  // Get current target baselink rotation for smooth transition
+  double curr_r, curr_p, curr_y;
+  tf::Matrix3x3(curr_target_baselink_rot_).getRPY(curr_r, curr_p, curr_y);
+
+  // Apply smooth pitch change limit
+  double pitch_diff = des_baselink_p - curr_p;
   if (fabs(pitch_diff) > baselink_rot_change_thresh_)
   {
-    p += pitch_diff / fabs(pitch_diff) * baselink_rot_change_thresh_;
+    curr_p += pitch_diff / fabs(pitch_diff) * baselink_rot_change_thresh_;
   }
   else
   {
-    p = target_pitch;
+    curr_p = des_baselink_p;
   }
 
-  // Update target baselink rotation with new pitch
-  final_target_baselink_rot_.setRPY(0, p, 0);  // Keep roll=0, yaw controlled by body frame
-
-  /* Debug output (optional) */
-  if (param_verbose_)
+  // Apply smooth roll change limit (though typically small)
+  double roll_diff = des_baselink_r - curr_r;
+  if (fabs(roll_diff) > baselink_rot_change_thresh_)
   {
-    ROS_INFO_THROTTLE(1.0, "[DragonCopilot] X: %.2f, Y: %.2f, Z: %.2f, Yaw: %.2f, Pitch: %.2f", world_vel_xy.x(),
-                      world_vel_xy.y(), z_vel_cmd, yaw_vel_cmd, target_pitch);
+    curr_r += roll_diff / fabs(roll_diff) * baselink_rot_change_thresh_;
   }
+  else
+  {
+    curr_r = des_baselink_r;
+  }
+
+  // Update final target baselink rotation (yaw controlled by omega, not from attitude)
+  final_target_baselink_rot_.setRPY(curr_r, curr_p, 0);  // yaw=0 means yaw control via omega_z
 }
 
 /* plugin registration */
