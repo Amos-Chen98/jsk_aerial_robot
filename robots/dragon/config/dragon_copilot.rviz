@@ -5,7 +5,7 @@ Panels:
     Property Tree Widget:
       Expanded: ~
       Splitter Ratio: 0.5
-    Tree Height: 1551
+    Tree Height: 270
   - Class: rviz/Selection
     Name: Selection
   - Class: rviz/Tool Properties
@@ -18,6 +18,7 @@ Panels:
   - Class: rviz/Views
     Expanded:
       - /Current View1
+      - /Current View1/Position1
     Name: Views
     Splitter Ratio: 0.5
   - Class: rviz/Time
@@ -290,26 +291,25 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz/ThirdPersonFollower
-      Distance: 3.3648409843444824
+      Class: rviz/FrameAligned
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
-      Field of View: 0.7853981852531433
-      Focal Point:
-        X: 0.46410900354385376
-        Y: 1.1118210554122925
-        Z: -0.9094724059104919
-      Focal Shape Fixed Size: true
-      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
+      Lock Camera: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5397958159446716
+      Pitch: 0.5
+      Point towards: arbitrary
+      Position:
+        X: 2.1148598194122314
+        Y: 0
+        Z: 1
+      Roll: 0
       Target Frame: dragon/root
-      Yaw: -1.5700000524520874
+      Yaw: -3.140000104904175
     Saved: ~
 Window Geometry:
   Displays:
