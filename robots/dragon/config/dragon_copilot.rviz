@@ -3,9 +3,10 @@ Panels:
     Help Height: 138
     Name: Displays
     Property Tree Widget:
-      Expanded: ~
+      Expanded:
+        - /Marker1
       Splitter Ratio: 0.5
-    Tree Height: 270
+    Tree Height: 1551
   - Class: rviz/Selection
     Name: Selection
   - Class: rviz/Tool Properties
@@ -264,6 +265,24 @@ Visualization Manager:
       size: 128
       text size: 14
       top: 128
+    - Class: rviz/Marker
+      Enabled: true
+      Marker Topic: /dragon/copilot/trajectory_markers
+      Name: Marker
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /dragon/copilot/trajectory_visualization
+      Name: MarkerArray
+      Namespaces:
+        trajectory_path: true
+        trajectory_waypoints: true
+        velocity_arrows: true
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 255; 255; 255
@@ -301,7 +320,7 @@ Visualization Manager:
       Lock Camera: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.5
+      Pitch: 0.6399998664855957
       Point towards: arbitrary
       Position:
         X: 2.1148598194122314
@@ -309,7 +328,7 @@ Visualization Manager:
         Z: 1
       Roll: 0
       Target Frame: dragon/root
-      Yaw: -3.140000104904175
+      Yaw: 3.1381852626800537
     Saved: ~
 Window Geometry:
   Displays:

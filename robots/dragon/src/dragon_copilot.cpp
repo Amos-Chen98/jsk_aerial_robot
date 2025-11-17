@@ -11,6 +11,8 @@ DragonCopilot::DragonCopilot()
   , l2_trigger_initialized_(false)
   , last_commanded_pitch_(0.0)
   , hold_attitude_on_idle_(true)
+  , link_num_(0)       // Will be initialized from robot model
+  , link_length_(0.5)  // Default value, will be updated from robot model
 {
 }
 
@@ -20,6 +22,29 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
 {
   /* initialize the parent class */
   DragonNavigator::initialize(nh, nhp, robot_model, estimator, loop_du);
+
+  /* Initialize MINCO parameters based on robot model */
+  link_num_ = robot_model_->getRotorNum();  // For Dragon, rotor_num equals link_num
+
+  /* Get link_length from transformable robot model */
+  auto transformable_model = boost::dynamic_pointer_cast<aerial_robot_model::transformable::RobotModel>(robot_model_);
+  if (transformable_model)
+  {
+    link_length_ = transformable_model->getLinkLength();
+    ROS_INFO("[DragonCopilot] Link length retrieved from robot model: %.3f m", link_length_);
+  }
+  else
+  {
+    ROS_WARN("[DragonCopilot] Could not cast to TransformableRobotModel, using default link length: %.3f m",
+             link_length_);
+  }
+
+  ROS_INFO("[DragonCopilot] MINCO trajectory initialized:");
+  ROS_INFO("[DragonCopilot] - Trajectory pieces: %d (one per link)", link_num_);
+
+  /* Initialize trajectory visualization publisher */
+  trajectory_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("copilot/trajectory_visualization", 1);
+  ROS_INFO("[DragonCopilot] Trajectory visualization publisher initialized");
 }
 
 void DragonCopilot::rosParamInit()
@@ -342,33 +367,305 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& cmd)
   des_world_to_baselink_rotation.GetRPY(des_baselink_r, des_baselink_p, des_baselink_y);
 
   // Get current target baselink rotation for smooth transition
-  double curr_r, curr_p, curr_y;
-  tf::Matrix3x3(curr_target_baselink_rot_).getRPY(curr_r, curr_p, curr_y);
+  double curr_baselink_r, curr_baselink_p, curr_baselink_y;
+  tf::Matrix3x3(curr_target_baselink_rot_).getRPY(curr_baselink_r, curr_baselink_p, curr_baselink_y);
 
   // Apply smooth pitch change limit
-  double pitch_diff = des_baselink_p - curr_p;
+  double pitch_diff = des_baselink_p - curr_baselink_p;
   if (fabs(pitch_diff) > baselink_rot_change_thresh_)
   {
-    curr_p += pitch_diff / fabs(pitch_diff) * baselink_rot_change_thresh_;
+    curr_baselink_p += pitch_diff / fabs(pitch_diff) * baselink_rot_change_thresh_;
   }
   else
   {
-    curr_p = des_baselink_p;
+    curr_baselink_p = des_baselink_p;
   }
 
   // Apply smooth roll change limit (though typically small)
-  double roll_diff = des_baselink_r - curr_r;
+  double roll_diff = des_baselink_r - curr_baselink_r;
   if (fabs(roll_diff) > baselink_rot_change_thresh_)
   {
-    curr_r += roll_diff / fabs(roll_diff) * baselink_rot_change_thresh_;
+    curr_baselink_r += roll_diff / fabs(roll_diff) * baselink_rot_change_thresh_;
   }
   else
   {
-    curr_r = des_baselink_r;
+    curr_baselink_r = des_baselink_r;
   }
 
   // Update final target baselink rotation (yaw controlled by omega, not from attitude)
-  final_target_baselink_rot_.setRPY(curr_r, curr_p, 0);  // yaw=0 means yaw control via omega_z
+  final_target_baselink_rot_.setRPY(curr_baselink_r, curr_baselink_p, 0);  // yaw=0 means yaw control via omega_z
+
+  // ===== Step 5.5: Generate MINCO trajectory and compute velocity directions =====
+  std::vector<Eigen::Vector3d> link_velocity_directions = copilotPlan(joint_positions);
+
+  // ===== Step 6: Publish joint control commands (minimal placeholder implementation) =====
+
+  // Only publish joint control in HOVER_STATE to avoid conflicts with landing process
+  if (getNaviState() == HOVER_STATE)
+  {
+    sensor_msgs::JointState joint_control_msg;
+
+    // TODO: Implement joint control logic here
+    // For now, this is a minimal placeholder that does nothing
+    // Example structure (commented out):
+    // joint_control_msg.position.push_back(target_joint1_angle);
+    // joint_control_msg.position.push_back(target_joint2_angle);
+    // ...
+
+    // Uncomment the following line when ready to actually publish joint commands:
+    // joint_control_pub_.publish(joint_control_msg);
+
+    // Note: Joint control should be coordinated with pitch attitude control
+    // to ensure the robot's physical configuration matches the desired baselink attitude
+  }
+}
+
+std::vector<Eigen::Vector3d> DragonCopilot::copilotPlan(const KDL::JntArray& joint_positions)
+{
+  generateMincoTrajectory(joint_positions);
+
+  visualizeTrajectory();
+
+  return computeLinkVel();
+}
+
+void DragonCopilot::generateMincoTrajectory(const KDL::JntArray& joint_positions)
+{
+  std::vector<Eigen::Vector3d> link_waypoints = calculateLinkWaypoints(joint_positions);
+
+  Eigen::Matrix3d headState;
+  headState.col(0) = link_waypoints[0];        // Initial position (link1 head)
+  headState.col(1) = Eigen::Vector3d::Zero();  // Initial velocity
+  headState.col(2) = Eigen::Vector3d::Zero();  // Initial acceleration
+
+  Eigen::Matrix3d tailState;
+  tailState.col(0) = link_waypoints[link_num_];  // Final position (last link tail)
+  tailState.col(1) = Eigen::Vector3d::Zero();    // Final velocity
+  tailState.col(2) = Eigen::Vector3d::Zero();    // Final acceleration
+
+  Eigen::Matrix3Xd intermediate_waypoints(3, link_num_ - 1);
+  for (int i = 0; i < link_num_ - 1; i++)
+  {
+    intermediate_waypoints.col(i) = link_waypoints[i + 1];  // link2, link3, ..., linkN heads
+  }
+
+  Eigen::VectorXd time_allocation = Eigen::VectorXd::Ones(link_num_);
+
+  minco_.setConditions(headState, tailState, link_num_);
+  minco_.setParameters(intermediate_waypoints, time_allocation);
+  minco_.getTrajectory(current_trajectory_);  // the traj is in root frame
+}
+
+std::vector<Eigen::Vector3d> DragonCopilot::calculateLinkWaypoints(const KDL::JntArray& joint_positions)
+{
+  std::vector<Eigen::Vector3d> link_waypoints;
+  link_waypoints.reserve(link_num_ + 1);
+
+  // Get world-to-root transformation for converting waypoints to world frame
+  KDL::Frame world_to_baselink;
+  tf::poseTFToKDL(tf::Pose(tf::Transform(estimator_->getOrientation(Frame::BASELINK, estimate_mode_),
+                                         estimator_->getPos(Frame::BASELINK, estimate_mode_))),
+                  world_to_baselink);
+
+  KDL::Frame root_to_baselink = robot_model_->forwardKinematics<KDL::Frame>("fc", joint_positions);
+  KDL::Frame baselink_to_root = root_to_baselink.Inverse();
+  KDL::Frame world_to_root = world_to_baselink * baselink_to_root;
+
+  // Get positions for each link head (link1, link2, ..., linkN) in root frame, then convert to world frame
+  for (int i = 1; i <= link_num_; i++)
+  {
+    std::string link_name = "link" + std::to_string(i);
+    KDL::Frame link_frame = robot_model_->forwardKinematics<KDL::Frame>(link_name, joint_positions);
+
+    // Transform from root frame to world frame
+    KDL::Frame link_frame_world = world_to_root * link_frame;
+
+    Eigen::Vector3d link_pos_world;  // Position in world frame
+    link_pos_world << link_frame_world.p.x(), link_frame_world.p.y(), link_frame_world.p.z();
+    link_waypoints.push_back(link_pos_world);
+  }
+
+  // Get last link frame and orientation
+  std::string last_link_name = "link" + std::to_string(link_num_);
+  KDL::Frame last_link_frame = robot_model_->forwardKinematics<KDL::Frame>(last_link_name, joint_positions);
+
+  // Calculate tail position: last link head + link_length_ * link_x_direction
+  KDL::Vector link_x_direction = last_link_frame.M * KDL::Vector(1.0, 0.0, 0.0);  // x-axis in link frame
+  KDL::Vector tail_position_kdl = last_link_frame.p + link_length_ * link_x_direction;
+
+  // Convert tail position from root frame to world frame
+  KDL::Frame tail_frame_root;
+  tail_frame_root.p = tail_position_kdl;
+  tail_frame_root.M = KDL::Rotation::Identity();
+  KDL::Frame tail_frame_world = world_to_root * tail_frame_root;
+
+  Eigen::Vector3d tail_pos_world;
+  tail_pos_world << tail_frame_world.p.x(), tail_frame_world.p.y(), tail_frame_world.p.z();
+  link_waypoints.push_back(tail_pos_world);
+
+  // Log all waypoints (throttled to once per second)
+  static double last_waypoint_log_time = 0.0;
+  double current_time = ros::Time::now().toSec();
+  if (current_time - last_waypoint_log_time >= 1.0)
+  {
+    ROS_INFO("[DragonCopilot] Link Waypoints (World Frame):");
+    for (size_t i = 0; i < link_waypoints.size(); i++)
+    {
+      if (i < link_waypoints.size() - 1)
+      {
+        // Link heads
+        ROS_INFO("[DragonCopilot]   Link%zu head: [%.3f, %.3f, %.3f]",
+                 i + 1,  // Link numbering starts from 1
+                 link_waypoints[i].x(), link_waypoints[i].y(), link_waypoints[i].z());
+      }
+      else
+      {
+        // Last link tail
+        ROS_INFO("[DragonCopilot]   Link%d tail: [%.3f, %.3f, %.3f]", link_num_, link_waypoints[i].x(),
+                 link_waypoints[i].y(), link_waypoints[i].z());
+      }
+    }
+    last_waypoint_log_time = current_time;
+  }
+
+  return link_waypoints;
+}
+
+std::vector<Eigen::Vector3d> DragonCopilot::computeLinkVel()
+{
+  // Compute velocity directions for all links
+  std::vector<Eigen::Vector3d> link_velocity_directions;
+
+  for (int i = 1; i < link_num_; i++)  // Start from link2 (index 1)
+  {
+    // Time at which this link head appears in trajectory
+    // link2 is at t=1.0, link3 is at t=2.0, etc.
+    double t = static_cast<double>(i);
+
+    Eigen::Vector3d vel = current_trajectory_.getVel(t);
+
+    Eigen::Vector3d vel_direction = Eigen::Vector3d::Zero();
+    double vel_norm = vel.norm();
+    if (vel_norm > 1e-6)  // Avoid division by zero
+    {
+      vel_direction = -vel / vel_norm;  // Negate to get opposite direction
+    }
+
+    link_velocity_directions.push_back(vel_direction);
+  }
+
+  // Log all velocity directions at once (throttled to once per second)
+  static double last_log_time = 0.0;
+  double current_time = ros::Time::now().toSec();
+  if (current_time - last_log_time >= 1.0)
+  {
+    ROS_INFO("[DragonCopilot] MINCO Trajectory Link Velocity Directions:");
+    for (int i = 0; i < link_velocity_directions.size(); i++)
+    {
+      // Get velocity norm at this link
+      double t = static_cast<double>(i + 1);
+      Eigen::Vector3d vel = current_trajectory_.getVel(t);
+      double vel_norm = vel.norm();
+
+      ROS_INFO("[DragonCopilot]   Link%d: direction=[%.3f, %.3f, %.3f], norm=%.3f m/s",
+               i + 2,  // i+2 because we start from link2
+               link_velocity_directions[i].x(), link_velocity_directions[i].y(), link_velocity_directions[i].z(),
+               vel_norm);
+    }
+    last_log_time = current_time;
+  }
+
+  return link_velocity_directions;
+}
+
+void DragonCopilot::visualizeTrajectory()
+{
+  ros::Time current_time = ros::Time::now();
+  visualization_msgs::MarkerArray marker_array;
+
+  // Create LINE_STRIP marker for trajectory path
+  visualization_msgs::Marker trajectory_line;
+  trajectory_line.header.frame_id = "world";
+  trajectory_line.header.stamp = current_time;
+  trajectory_line.ns = "trajectory_path";
+  trajectory_line.id = 0;
+  trajectory_line.type = visualization_msgs::Marker::LINE_STRIP;
+  trajectory_line.action = visualization_msgs::Marker::ADD;
+  trajectory_line.pose.orientation.w = 1.0;
+
+  // Line appearance
+  trajectory_line.scale.x = 0.015;  // Line width (15mm)
+  trajectory_line.color.r = 0.0;
+  trajectory_line.color.g = 0.5;
+  trajectory_line.color.b = 1.0;  // Light blue color
+  trajectory_line.color.a = 0.8;
+
+  // Sample the trajectory at high frequency for smooth visualization
+  double total_time = static_cast<double>(link_num_);
+  double dt = 0.02;  // 50 Hz sampling for smooth line
+
+  for (double t = 0.0; t <= total_time; t += dt)
+  {
+    Eigen::Vector3d pos = current_trajectory_.getPos(t);
+    geometry_msgs::Point p;
+    p.x = pos.x();
+    p.y = pos.y();
+    p.z = pos.z();
+    trajectory_line.points.push_back(p);
+  }
+
+  marker_array.markers.push_back(trajectory_line);
+
+  // Create velocity direction arrows at each link
+  int arrow_id = 2;
+  for (int i = 1; i < link_num_; i++)  // Start from link2
+  {
+    double t = static_cast<double>(i);
+    Eigen::Vector3d pos = current_trajectory_.getPos(t);
+    Eigen::Vector3d vel = current_trajectory_.getVel(t);
+
+    // Only show arrow if velocity is significant
+    if (vel.norm() < 1e-6)
+      continue;
+
+    visualization_msgs::Marker arrow_marker;
+    arrow_marker.header.frame_id = "world";
+    arrow_marker.header.stamp = current_time;
+    arrow_marker.ns = "velocity_arrows";
+    arrow_marker.id = arrow_id++;
+    arrow_marker.type = visualization_msgs::Marker::ARROW;
+    arrow_marker.action = visualization_msgs::Marker::ADD;
+    arrow_marker.pose.orientation.w = 1.0;
+
+    // Arrow appearance
+    arrow_marker.scale.x = 0.02;  // Shaft diameter
+    arrow_marker.scale.y = 0.04;  // Head diameter
+    arrow_marker.scale.z = 0.06;  // Head length
+    arrow_marker.color.r = 0.0;
+    arrow_marker.color.g = 1.0;  // Green color for velocity arrows
+    arrow_marker.color.b = 0.0;
+    arrow_marker.color.a = 0.8;
+
+    // Arrow start point (position)
+    geometry_msgs::Point start_point;
+    start_point.x = pos.x();
+    start_point.y = pos.y();
+    start_point.z = pos.z();
+    arrow_marker.points.push_back(start_point);
+
+    // Arrow end point (position + velocity direction scaled)
+    Eigen::Vector3d vel_direction = -vel.normalized() * 0.2;  // 20cm arrows, negated for opposite direction
+    geometry_msgs::Point end_point;
+    end_point.x = pos.x() + vel_direction.x();
+    end_point.y = pos.y() + vel_direction.y();
+    end_point.z = pos.z() + vel_direction.z();
+    arrow_marker.points.push_back(end_point);
+
+    marker_array.markers.push_back(arrow_marker);
+  }
+
+  // Publish all markers at once
+  trajectory_viz_pub_.publish(marker_array);
 }
 
 /* plugin registration */

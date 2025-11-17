@@ -6,6 +6,7 @@
  */
 
 #include <iostream>
+#include <chrono>
 #include <Eigen/Eigen>
 #include "aerial_robot_control/minco_trajectory/minco.hpp"
 #include "aerial_robot_control/minco_trajectory/trajectory.hpp"
@@ -34,9 +35,6 @@ int main(int argc, char** argv)
     tailState.col(1) = Eigen::Vector3d(0.0, 0.0, 0.0);  // Final velocity
     tailState.col(2) = Eigen::Vector3d(0.0, 0.0, 0.0);  // Final acceleration
 
-    // Set conditions for MINCO
-    minco.setConditions(headState, tailState, pieceNum);
-
     // Define intermediate waypoints (for 2 pieces, we need 1 intermediate point)
     Eigen::Matrix3Xd waypoints(3, pieceNum - 1);
     waypoints.col(0) = Eigen::Vector3d(2.5, 2.0, 1.0);
@@ -46,12 +44,28 @@ int main(int argc, char** argv)
     timeAllocation(0) = 2.0;  // First piece duration
     timeAllocation(1) = 2.0;  // Second piece duration
 
+    // Start timing for trajectory generation
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // Set conditions for MINCO
+    minco.setConditions(headState, tailState, pieceNum);
+
     // Generate trajectory by setting parameters
     minco.setParameters(waypoints, timeAllocation);
 
     // Get the generated trajectory
     Trajectory<5> trajectory;
     minco.getTrajectory(trajectory);
+
+    // Stop timing
+    auto end_time = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end_time - start_time);
+    double generation_time_ms = duration.count() / 1000.0;
+
+    // Print trajectory generation time
+    std::cout << "Trajectory Generation Time: " << generation_time_ms << " ms" << std::endl;
+    std::cout << "                            " << duration.count() << " microseconds" << std::endl;
+    std::cout << std::endl;
 
     // Print trajectory information
     std::cout << "Trajectory Information:" << std::endl;
