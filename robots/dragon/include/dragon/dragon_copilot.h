@@ -36,6 +36,10 @@
 #pragma once
 
 #include <dragon/dragon_navigation.h>
+#include <aerial_robot_model/model/transformable_aerial_robot_model.h>
+#include <aerial_robot_control/minco_trajectory/minco.hpp>
+#include <aerial_robot_control/minco_trajectory/trajectory.hpp>
+#include <visualization_msgs/MarkerArray.h>
 
 namespace aerial_robot_navigation
 {
@@ -107,6 +111,76 @@ private:
    */
   void transformAndSetControlTargets(const RootFrameCommand& cmd);
 
+  /**
+   * @brief Generate MINCO trajectory and compute velocity directions for link control
+   *
+   * This method:
+   * 1. Calculates 3D positions of all link heads and the last link tail using forward kinematics
+   * 2. Generates a MINCO (Minimum Control) trajectory passing through these waypoints
+   * 3. Computes velocity directions at each link head for joint control
+   * 4. Logs velocity information for debugging
+   *
+   * The generated trajectory is stored in current_trajectory_ for later use in joint control.
+   *
+   * @param joint_positions Current joint angles from robot model
+   * @return Vector of velocity directions (normalized) for each link starting from link2
+   */
+  std::vector<Eigen::Vector3d> copilotPlan(const KDL::JntArray& joint_positions);
+
+  /**
+   * @brief Compute and log velocity directions from the generated MINCO trajectory
+   *
+   * This method computes the velocity direction (normalized velocity vector) at each link head
+   * position along the generated trajectory. The directions are useful for determining the
+   * desired joint angles to align each link with the trajectory.
+   *
+   * Logging is throttled to once per second to avoid console spam.
+   *
+   * @return Vector of velocity directions (normalized) for each link starting from link2
+   */
+  std::vector<Eigen::Vector3d> computeLinkVel();
+
+  /**
+   * @brief Calculate link waypoints from current joint positions
+   *
+   * This method computes 3D positions of all link heads and the tail position of the last link
+   * using forward kinematics. The waypoints are in root frame coordinates.
+   *
+   * Waypoints include:
+   * - Link1 head, Link2 head, ..., LinkN head
+   * - Last link tail (computed as: last link head + link_length * link_x_direction)
+   *
+   * @param joint_positions Current joint angles from robot model
+   * @return Vector of waypoints (link_num + 1 waypoints total)
+   */
+  std::vector<Eigen::Vector3d> calculateLinkWaypoints(const KDL::JntArray& joint_positions);
+
+  /**
+   * @brief Generate MINCO trajectory from link waypoints
+   *
+   * This method:
+   * 1. Calculates link waypoints using calculateLinkWaypoints()
+   * 2. Sets up boundary conditions (position, velocity, acceleration)
+   * 3. Generates the MINCO trajectory through all waypoints
+   *
+   * The generated trajectory is stored in current_trajectory_ member variable.
+   *
+   * @param joint_positions Current joint angles from robot model
+   */
+  void generateMincoTrajectory(const KDL::JntArray& joint_positions);
+
+  /**
+   * @brief Visualize the MINCO trajectory in RViz
+   *
+   * This method publishes two visualization messages:
+   * 1. A LINE_STRIP marker showing the continuous trajectory path
+   * 2. SPHERE markers at each waypoint (link head positions)
+   *
+   * The trajectory is sampled at high frequency (100 Hz) to provide smooth visualization.
+   * Waypoints are shown as colored spheres to indicate link positions.
+   */
+  void visualizeTrajectory();
+
   /* copilot specific parameters */
   double max_copilot_x_vel_;        // maximum forward/backward velocity
   double max_copilot_y_vel_;        // maximum lateral velocity
@@ -123,5 +197,18 @@ private:
   /* attitude hold when no joystick input */
   double last_commanded_pitch_;  // last pitch angle when there was joystick input
   bool hold_attitude_on_idle_;   // flag to enable attitude hold when no input (default: true)
+
+  /* MINCO trajectory generation */
+  minco::MINCO_S3NU minco_;           // MINCO trajectory generator for minimum jerk (s=3)
+  Trajectory<5> current_trajectory_;  // Current trajectory being executed
+
+  /* MINCO parameters */
+  // For Dragon: piece_num = link_num, total waypoints = link_num + 1
+  // Each piece represents one link segment with 1 second duration
+  int link_num_;        // Number of robot links (equals rotor number)
+  double link_length_;  // Length of each link segment [m]
+
+  /* Visualization */
+  ros::Publisher trajectory_viz_pub_;  // Publisher for trajectory visualization (path and markers)
 };
 };  // namespace aerial_robot_navigation
