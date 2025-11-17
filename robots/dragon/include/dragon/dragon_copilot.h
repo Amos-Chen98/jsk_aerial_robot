@@ -174,10 +174,11 @@ private:
    *
    * This method publishes two visualization messages:
    * 1. A LINE_STRIP marker showing the continuous trajectory path
-   * 2. SPHERE markers at each waypoint (link head positions)
+   * 2. ARROW markers showing velocity directions at each link head
    *
-   * The trajectory is sampled at high frequency (100 Hz) to provide smooth visualization.
-   * Waypoints are shown as colored spheres to indicate link positions.
+   * The trajectory is sampled at 50 Hz (dt=0.02s) to provide smooth visualization.
+   * Velocity arrows are displayed at link positions (starting from link2) to indicate
+   * the trajectory direction, with arrows pointing opposite to the velocity for visualization.
    */
   void visualizeTrajectory();
 
@@ -210,5 +211,48 @@ private:
 
   /* Visualization */
   ros::Publisher trajectory_viz_pub_;  // Publisher for trajectory visualization (path and markers)
+
+  /* Cached transformations (updated once per control cycle) */
+  KDL::Frame world_to_cog_;        // CoG frame in world coordinates
+  KDL::Frame world_to_baselink_;   // Baselink frame in world coordinates
+  KDL::Frame root_to_baselink_;    // Transform from root (link1) to baselink (FC)
+  KDL::Frame baselink_to_root_;    // Transform from baselink to root
+  KDL::Frame world_to_root_;       // Root frame in world coordinates
+  KDL::JntArray joint_positions_;  // Current joint positions
+
+  /**
+   * @brief Update all cached transformations for current control cycle
+   *
+   * This method should be called once at the beginning of each control cycle
+   * to update all transformation frames. This avoids redundant calculations
+   * across multiple functions.
+   */
+  void updateTransformationCache();
+
+  /**
+   * @brief Compute and set CoG velocity targets from root frame commands
+   *
+   * This method transforms velocity commands from root frame to CoG velocity targets
+   * considering the position offset between root and CoG, as well as the contribution
+   * from rotational velocity. It then sets the target velocities for the control system.
+   *
+   * Formula: v_cog = v_root + omega x (r_cog - r_root)
+   *
+   * @param cmd Root frame command structure containing velocity and attitude commands
+   */
+  void setCoGVelocityTargets(const RootFrameCommand& cmd);
+
+  /**
+   * @brief Set pitch attitude target with smooth transition
+   *
+   * This method computes the desired baselink orientation from the commanded root frame pitch,
+   * applies smooth transition limits to avoid abrupt attitude changes, and updates the final
+   * target baselink rotation for the control system.
+   *
+   * The transformation follows: {}^{world}R_{baselink} = {}^{world}R_{root} * {}^{root}R_{baselink}
+   *
+   * @param cmd Root frame command structure containing pitch attitude command
+   */
+  void setPitchAttitudeTarget(const RootFrameCommand& cmd);
 };
 };  // namespace aerial_robot_navigation

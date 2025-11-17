@@ -300,59 +300,98 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& cmd)
   // - Baselink frame: the FC (flight controller) frame, what the controller uses
   // - CoG: center of gravity, what the controller actually tracks
 
-  // ===== Step 1: Get all necessary frames using KDL and TF =====
-  const KDL::JntArray& joint_positions = robot_model_->getJointPositions();
+  // ===== Step 1: Update transformation cache (all frames computed once) =====
+  updateTransformationCache();
 
-  KDL::Frame world_to_cog;  // CoG frame in world coordinates {}^{world}T_{cog}
+  // ===== Step 2: Compute and set CoG velocity targets =====
+  setCoGVelocityTargets(cmd);
+
+  // ===== Step 3: Set pitch attitude target =====
+  setPitchAttitudeTarget(cmd);
+
+  // ===== Step 4: Generate MINCO trajectory and compute velocity directions =====
+  std::vector<Eigen::Vector3d> link_velocity_directions = copilotPlan(joint_positions_);
+
+  // ===== Step 5: Publish joint control commands (minimal placeholder implementation) =====
+
+  // Only publish joint control in HOVER_STATE to avoid conflicts with landing process
+  if (getNaviState() == HOVER_STATE)
+  {
+    sensor_msgs::JointState joint_control_msg;
+
+    // TODO: Implement joint control logic here
+    // For now, this is a minimal placeholder that does nothing
+    // Example structure (commented out):
+    // joint_control_msg.position.push_back(target_joint1_angle);
+    // joint_control_msg.position.push_back(target_joint2_angle);
+    // ...
+
+    // Uncomment the following line when ready to actually publish joint commands:
+    // joint_control_pub_.publish(joint_control_msg);
+
+    // Note: Joint control should be coordinated with pitch attitude control
+    // to ensure the robot's physical configuration matches the desired baselink attitude
+  }
+}
+
+void DragonCopilot::updateTransformationCache()
+{
+  // Get current joint positions
+  joint_positions_ = robot_model_->getJointPositions();
+
+  // Get CoG frame in world coordinates
   tf::poseTFToKDL(tf::Pose(tf::Transform(estimator_->getOrientation(Frame::COG, estimate_mode_),
                                          estimator_->getPos(Frame::COG, estimate_mode_))),
-                  world_to_cog);
+                  world_to_cog_);
 
-  KDL::Frame world_to_baselink;
+  // Get baselink frame in world coordinates
   tf::poseTFToKDL(tf::Pose(tf::Transform(estimator_->getOrientation(Frame::BASELINK, estimate_mode_),
                                          estimator_->getPos(Frame::BASELINK, estimate_mode_))),
-                  world_to_baselink);
+                  world_to_baselink_);
 
-  KDL::Frame root_to_baselink = robot_model_->forwardKinematics<KDL::Frame>("fc", joint_positions);
+  // Get root to baselink transform from forward kinematics
+  root_to_baselink_ = robot_model_->forwardKinematics<KDL::Frame>("fc", joint_positions_);
 
-  KDL::Frame baselink_to_root = root_to_baselink.Inverse();
+  // Calculate inverse transform
+  baselink_to_root_ = root_to_baselink_.Inverse();
 
-  KDL::Frame world_to_root = world_to_baselink * baselink_to_root;
+  // Calculate world to root transform
+  world_to_root_ = world_to_baselink_ * baselink_to_root_;
+}
 
-  // ===== Step 2: get desired root vel and omega in world frame =====
-
+void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& cmd)
+{
+  // Transform root frame body velocities to world frame
   KDL::Vector root_vel_body(cmd.x_vel, cmd.y_vel, 0.0);
+  KDL::Vector des_root_vel_world = world_to_root_.M * root_vel_body;
 
-  KDL::Vector des_root_vel_world = world_to_root.M * root_vel_body;
-
+  // Transform root frame angular velocity to world frame
   KDL::Vector root_omega_body(0.0, 0.0, cmd.yaw_vel);
+  KDL::Vector des_root_omega_world = world_to_root_.M * root_omega_body;
 
-  KDL::Vector des_root_omega_world = world_to_root.M * root_omega_body;
-
-  // ===== Step 3: get desired CoG vel and omega in world frame =====
-
-  // Position offset from root to CoG in world frame
-  KDL::Vector root_to_cog_offset_world = world_to_cog.p - world_to_root.p;
+  // Calculate position offset from root to CoG in world frame
+  KDL::Vector root_to_cog_offset_world = world_to_cog_.p - world_to_root_.p;
 
   // Velocity contribution from rotation: omega x r
-  KDL::Vector vel_from_rotation = des_root_omega_world * root_to_cog_offset_world;  // KDL Vector cross product operator
+  KDL::Vector vel_from_rotation = des_root_omega_world * root_to_cog_offset_world;
 
   // Final CoG velocity: v_cog = v_root + omega x (r_cog - r_root)
   KDL::Vector des_cog_vel_world = des_root_vel_world + vel_from_rotation;
 
-  // ===== Step 4: Set velocity targets =====
-
+  // Set velocity targets
   setTargetVelX(des_cog_vel_world.x());
   setTargetVelY(des_cog_vel_world.y());
   setTargetVelZ(des_cog_vel_world.z() + cmd.z_vel);  // Add world frame z command
 
+  // Set yaw velocity
   setTargetOmegaZ(des_root_omega_world.z());
+}
 
-  // ===== Step 5: Set pitch attitude target using rotation matrices =====
-
+void DragonCopilot::setPitchAttitudeTarget(const RootFrameCommand& cmd)
+{
   // Get current root yaw in world frame
   double root_r, root_p, root_y;
-  world_to_root.M.GetRPY(root_r, root_p, root_y);
+  world_to_root_.M.GetRPY(root_r, root_p, root_y);
 
   // Construct desired root orientation in world frame
   // Keep current yaw, apply commanded pitch, zero roll (level flight)
@@ -360,7 +399,7 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& cmd)
 
   // Calculate desired baselink orientation using rotation composition:
   // {}^{world}R_{baselink} = {}^{world}R_{root} * {}^{root}R_{baselink}
-  KDL::Rotation des_world_to_baselink_rotation = des_world_to_root_rotation * root_to_baselink.M;
+  KDL::Rotation des_world_to_baselink_rotation = des_world_to_root_rotation * root_to_baselink_.M;
 
   // Extract RPY from desired baselink rotation
   double des_baselink_r, des_baselink_p, des_baselink_y;
@@ -394,30 +433,6 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& cmd)
 
   // Update final target baselink rotation (yaw controlled by omega, not from attitude)
   final_target_baselink_rot_.setRPY(curr_baselink_r, curr_baselink_p, 0);  // yaw=0 means yaw control via omega_z
-
-  // ===== Step 5.5: Generate MINCO trajectory and compute velocity directions =====
-  std::vector<Eigen::Vector3d> link_velocity_directions = copilotPlan(joint_positions);
-
-  // ===== Step 6: Publish joint control commands (minimal placeholder implementation) =====
-
-  // Only publish joint control in HOVER_STATE to avoid conflicts with landing process
-  if (getNaviState() == HOVER_STATE)
-  {
-    sensor_msgs::JointState joint_control_msg;
-
-    // TODO: Implement joint control logic here
-    // For now, this is a minimal placeholder that does nothing
-    // Example structure (commented out):
-    // joint_control_msg.position.push_back(target_joint1_angle);
-    // joint_control_msg.position.push_back(target_joint2_angle);
-    // ...
-
-    // Uncomment the following line when ready to actually publish joint commands:
-    // joint_control_pub_.publish(joint_control_msg);
-
-    // Note: Joint control should be coordinated with pitch attitude control
-    // to ensure the robot's physical configuration matches the desired baselink attitude
-  }
 }
 
 std::vector<Eigen::Vector3d> DragonCopilot::copilotPlan(const KDL::JntArray& joint_positions)
@@ -461,15 +476,8 @@ std::vector<Eigen::Vector3d> DragonCopilot::calculateLinkWaypoints(const KDL::Jn
   std::vector<Eigen::Vector3d> link_waypoints;
   link_waypoints.reserve(link_num_ + 1);
 
-  // Get world-to-root transformation for converting waypoints to world frame
-  KDL::Frame world_to_baselink;
-  tf::poseTFToKDL(tf::Pose(tf::Transform(estimator_->getOrientation(Frame::BASELINK, estimate_mode_),
-                                         estimator_->getPos(Frame::BASELINK, estimate_mode_))),
-                  world_to_baselink);
-
-  KDL::Frame root_to_baselink = robot_model_->forwardKinematics<KDL::Frame>("fc", joint_positions);
-  KDL::Frame baselink_to_root = root_to_baselink.Inverse();
-  KDL::Frame world_to_root = world_to_baselink * baselink_to_root;
+  // Use cached world-to-root transformation (already computed in updateTransformationCache)
+  // No need to recalculate world_to_baselink, root_to_baselink, baselink_to_root, world_to_root
 
   // Get positions for each link head (link1, link2, ..., linkN) in root frame, then convert to world frame
   for (int i = 1; i <= link_num_; i++)
@@ -478,7 +486,7 @@ std::vector<Eigen::Vector3d> DragonCopilot::calculateLinkWaypoints(const KDL::Jn
     KDL::Frame link_frame = robot_model_->forwardKinematics<KDL::Frame>(link_name, joint_positions);
 
     // Transform from root frame to world frame
-    KDL::Frame link_frame_world = world_to_root * link_frame;
+    KDL::Frame link_frame_world = world_to_root_ * link_frame;
 
     Eigen::Vector3d link_pos_world;  // Position in world frame
     link_pos_world << link_frame_world.p.x(), link_frame_world.p.y(), link_frame_world.p.z();
@@ -497,36 +505,11 @@ std::vector<Eigen::Vector3d> DragonCopilot::calculateLinkWaypoints(const KDL::Jn
   KDL::Frame tail_frame_root;
   tail_frame_root.p = tail_position_kdl;
   tail_frame_root.M = KDL::Rotation::Identity();
-  KDL::Frame tail_frame_world = world_to_root * tail_frame_root;
+  KDL::Frame tail_frame_world = world_to_root_ * tail_frame_root;
 
   Eigen::Vector3d tail_pos_world;
   tail_pos_world << tail_frame_world.p.x(), tail_frame_world.p.y(), tail_frame_world.p.z();
   link_waypoints.push_back(tail_pos_world);
-
-  // Log all waypoints (throttled to once per second)
-  static double last_waypoint_log_time = 0.0;
-  double current_time = ros::Time::now().toSec();
-  if (current_time - last_waypoint_log_time >= 1.0)
-  {
-    ROS_INFO("[DragonCopilot] Link Waypoints (World Frame):");
-    for (size_t i = 0; i < link_waypoints.size(); i++)
-    {
-      if (i < link_waypoints.size() - 1)
-      {
-        // Link heads
-        ROS_INFO("[DragonCopilot]   Link%zu head: [%.3f, %.3f, %.3f]",
-                 i + 1,  // Link numbering starts from 1
-                 link_waypoints[i].x(), link_waypoints[i].y(), link_waypoints[i].z());
-      }
-      else
-      {
-        // Last link tail
-        ROS_INFO("[DragonCopilot]   Link%d tail: [%.3f, %.3f, %.3f]", link_num_, link_waypoints[i].x(),
-                 link_waypoints[i].y(), link_waypoints[i].z());
-      }
-    }
-    last_waypoint_log_time = current_time;
-  }
 
   return link_waypoints;
 }
@@ -552,27 +535,6 @@ std::vector<Eigen::Vector3d> DragonCopilot::computeLinkVel()
     }
 
     link_velocity_directions.push_back(vel_direction);
-  }
-
-  // Log all velocity directions at once (throttled to once per second)
-  static double last_log_time = 0.0;
-  double current_time = ros::Time::now().toSec();
-  if (current_time - last_log_time >= 1.0)
-  {
-    ROS_INFO("[DragonCopilot] MINCO Trajectory Link Velocity Directions:");
-    for (int i = 0; i < link_velocity_directions.size(); i++)
-    {
-      // Get velocity norm at this link
-      double t = static_cast<double>(i + 1);
-      Eigen::Vector3d vel = current_trajectory_.getVel(t);
-      double vel_norm = vel.norm();
-
-      ROS_INFO("[DragonCopilot]   Link%d: direction=[%.3f, %.3f, %.3f], norm=%.3f m/s",
-               i + 2,  // i+2 because we start from link2
-               link_velocity_directions[i].x(), link_velocity_directions[i].y(), link_velocity_directions[i].z(),
-               vel_norm);
-    }
-    last_log_time = current_time;
   }
 
   return link_velocity_directions;
