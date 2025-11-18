@@ -26,6 +26,10 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
   /* Initialize MINCO parameters based on robot model */
   link_num_ = robot_model_->getRotorNum();  // For Dragon, rotor_num equals link_num
 
+  /* Initialize joint_positions_ array with correct size */
+  joint_positions_.resize(robot_model_->getJointNum());
+  ROS_INFO("[DragonCopilot] Joint positions array initialized with size: %d", robot_model_->getJointNum());
+
   /* Get link_length from transformable robot model */
   auto transformable_model = boost::dynamic_pointer_cast<aerial_robot_model::transformable::RobotModel>(robot_model_);
   if (transformable_model)
@@ -39,12 +43,30 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
              link_length_);
   }
 
-  ROS_INFO("[DragonCopilot] MINCO trajectory initialized:");
-  ROS_INFO("[DragonCopilot] - Trajectory pieces: %d (one per link)", link_num_);
-
   /* Initialize trajectory visualization publisher */
   trajectory_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("copilot/trajectory_visualization", 1);
-  ROS_INFO("[DragonCopilot] Trajectory visualization publisher initialized");
+
+  /* Initialize Jacobian computation components */
+  const KDL::Tree& tree = robot_model_->getTree();
+  jac_solver_.reset(new KDL::TreeJntToJacSolver(tree));
+  num_joints_ = tree.getNrOfJoints();
+
+  if (transformable_model)
+  {
+    link_joint_indices_ = transformable_model->getLinkJointIndices();
+    ROS_INFO("[DragonCopilot] Link joint indices initialized: %zu joints", link_joint_indices_.size());
+  }
+  else
+  {
+    ROS_ERROR("[DragonCopilot] Failed to get link joint indices from TransformableRobotModel");
+  }
+
+  /* Pre-compute all link names */
+  link_names_.reserve(link_num_);
+  for (int i = 1; i <= link_num_; i++)
+  {
+    link_names_.push_back("link" + std::to_string(i));
+  }
 }
 
 void DragonCopilot::rosParamInit()
@@ -167,15 +189,15 @@ void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
     return;
 
   /* Parse joystick inputs to get velocity and attitude commands */
-  RootFrameCommand cmd = parseJoystickInputs(joy_cmd);
+  RootFrameCommand root_cmd = parseJoystickInputs(joy_cmd);
 
   /* Transform velocity commands and set control targets */
-  transformAndSetControlTargets(cmd);
+  transformAndSetControlTargets(root_cmd);
 }
 
 RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_cmd)
 {
-  RootFrameCommand cmd;
+  RootFrameCommand root_cmd;
   // ---------- X-axis control (forward/backward) via R2/L2 triggers ----------
   // R2 trigger: forward (neutral=+1, full=-1, so we need to invert and normalize)
   // Handle initialization issue: ROS topic reports 0 until first press, then reports correctly
@@ -228,7 +250,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   // Calculate net x velocity command
   // R2 (forward_cmd) -> positive X velocity (root frame forward direction)
   // L2 (backward_cmd) -> negative X velocity (root frame backward direction)
-  cmd.x_vel = (forward_cmd - backward_cmd) * max_copilot_x_vel_;
+  root_cmd.x_vel = (forward_cmd - backward_cmd) * max_copilot_x_vel_;
 
   // ---------- Y-axis control via JOY_AXIS_STICK_RIGHT ----------
   // Right stick horizontal: lateral translation (y-axis)
@@ -237,7 +259,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   /* Process Y-axis motion (lateral translation) */
   if (fabs(raw_y_cmd) > joy_stick_deadzone_)
   {
-    cmd.y_vel = raw_y_cmd * max_copilot_y_vel_;
+    root_cmd.y_vel = raw_y_cmd * max_copilot_y_vel_;
   }
 
   // ---------- Z-axis control via JOY_AXIS_STICK_RIGHT ----------
@@ -247,7 +269,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   /* Process Z-axis motion (vertical translation) */
   if (fabs(raw_z_cmd) > joy_stick_deadzone_)
   {
-    cmd.z_vel = raw_z_cmd * max_copilot_z_vel_;
+    root_cmd.z_vel = raw_z_cmd * max_copilot_z_vel_;
   }
 
   // ---------- pitch control via JOY_AXIS_STICK_LEFT ----------
@@ -259,20 +281,20 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
 
   if (fabs(raw_pitch_cmd) > joy_stick_deadzone_)
   {
-    cmd.pitch = raw_pitch_cmd * max_copilot_pitch_angle_;
+    root_cmd.pitch = raw_pitch_cmd * max_copilot_pitch_angle_;
     has_pitch_input = true;
   }
   else if (hold_attitude_on_idle_)
   {
     // When no input and attitude hold is enabled, use last commanded pitch
-    cmd.pitch = last_commanded_pitch_;
+    root_cmd.pitch = last_commanded_pitch_;
   }
-  // else: cmd.pitch remains 0.0 (level flight) from constructor
+  // else: root_cmd.pitch remains 0.0 (level flight) from constructor
 
   // Update last commanded pitch if there was input
   if (has_pitch_input)
   {
-    last_commanded_pitch_ = cmd.pitch;
+    last_commanded_pitch_ = root_cmd.pitch;
   }
 
   // ---------- yaw control via JOY_AXIS_STICK_LEFT ----------
@@ -282,18 +304,18 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   /* Process Yaw motion (rotation around z-axis) */
   if (fabs(raw_yaw_cmd) > joy_stick_deadzone_)
   {
-    cmd.yaw_vel = raw_yaw_cmd * max_copilot_yaw_vel_;
+    root_cmd.yaw_vel = raw_yaw_cmd * max_copilot_yaw_vel_;
   }
 
   // Finally, revert x and y axis, so that the forward on joystick means forward along the head direction
-  cmd.x_vel = -cmd.x_vel;
-  cmd.y_vel = -cmd.y_vel;
-  cmd.pitch = -cmd.pitch;
+  root_cmd.x_vel = -root_cmd.x_vel;
+  root_cmd.y_vel = -root_cmd.y_vel;
+  root_cmd.pitch = -root_cmd.pitch;
 
-  return cmd;
+  return root_cmd;
 }
 
-void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& cmd)
+void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& root_cmd)
 {
   /* Transform velocity commands from root frame to CoG velocity targets */
   // - Root frame: the first link of the robot (link1 in Dragon URDF), what the user wants to control
@@ -304,34 +326,13 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& cmd)
   updateTransformationCache();
 
   // ===== Step 2: Compute and set CoG velocity targets =====
-  setCoGVelocityTargets(cmd);
+  setCoGVelocityTargets(root_cmd);
 
   // ===== Step 3: Set pitch attitude target =====
-  setPitchAttitudeTarget(cmd);
+  setPitchAttitudeTarget(root_cmd);
 
-  // ===== Step 4: Generate MINCO trajectory and compute velocity directions =====
-  std::vector<Eigen::Vector3d> link_velocity_directions = copilotPlan(joint_positions_);
-
-  // ===== Step 5: Publish joint control commands (minimal placeholder implementation) =====
-
-  // Only publish joint control in HOVER_STATE to avoid conflicts with landing process
-  if (getNaviState() == HOVER_STATE)
-  {
-    sensor_msgs::JointState joint_control_msg;
-
-    // TODO: Implement joint control logic here
-    // For now, this is a minimal placeholder that does nothing
-    // Example structure (commented out):
-    // joint_control_msg.position.push_back(target_joint1_angle);
-    // joint_control_msg.position.push_back(target_joint2_angle);
-    // ...
-
-    // Uncomment the following line when ready to actually publish joint commands:
-    // joint_control_pub_.publish(joint_control_msg);
-
-    // Note: Joint control should be coordinated with pitch attitude control
-    // to ensure the robot's physical configuration matches the desired baselink attitude
-  }
+  // ===== Step 4: Plan the movement of following links and publish joint control commands =====
+  copilotPlan(root_cmd);
 }
 
 void DragonCopilot::updateTransformationCache()
@@ -357,16 +358,59 @@ void DragonCopilot::updateTransformationCache()
 
   // Calculate world to root transform
   world_to_root_ = world_to_baselink_ * baselink_to_root_;
+
+  // Calculate Jacobians for each link head (link1 to linkN)
+  link_jacobians_.clear();
+  link_jacobians_.reserve(link_num_);
+
+  // Check if Jacobian solver is initialized
+  if (!jac_solver_ || link_joint_indices_.empty())
+  {
+    ROS_ERROR("[DragonCopilot] Jacobian solver or link joint indices not initialized");
+    return;
+  }
+
+  for (int i = 0; i < link_num_; i++)
+  {
+    const std::string& link_name = link_names_[i];
+
+    // Create full Jacobian with appropriate size (6 rows x number of joints)
+    KDL::Jacobian full_jacobian(num_joints_);
+
+    // Compute full Jacobian for this link frame with respect to root frame
+    int status = jac_solver_->JntToJac(joint_positions_, full_jacobian, link_name);
+
+    if (status < 0)
+    {
+      ROS_WARN("[DragonCopilot] Failed to compute Jacobian for %s", link_name.c_str());
+      continue;
+    }
+
+    // Extract only the columns corresponding to the 6 link joints
+    // Create a reduced Jacobian with 6 rows (3 linear + 3 angular) and link_joint_indices_.size() columns
+    KDL::Jacobian reduced_jacobian(link_joint_indices_.size());
+
+    for (size_t row = 0; row < 6; row++)
+    {
+      for (size_t col_idx = 0; col_idx < link_joint_indices_.size(); col_idx++)
+      {
+        int joint_idx = link_joint_indices_[col_idx];
+        reduced_jacobian(row, col_idx) = full_jacobian(row, joint_idx);
+      }
+    }
+
+    link_jacobians_.push_back(reduced_jacobian);
+  }
 }
 
-void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& cmd)
+void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
 {
   // Transform root frame body velocities to world frame
-  KDL::Vector root_vel_body(cmd.x_vel, cmd.y_vel, 0.0);
+  KDL::Vector root_vel_body(root_cmd.x_vel, root_cmd.y_vel, 0.0);
   KDL::Vector des_root_vel_world = world_to_root_.M * root_vel_body;
 
   // Transform root frame angular velocity to world frame
-  KDL::Vector root_omega_body(0.0, 0.0, cmd.yaw_vel);
+  KDL::Vector root_omega_body(0.0, 0.0, root_cmd.yaw_vel);
   KDL::Vector des_root_omega_world = world_to_root_.M * root_omega_body;
 
   // Calculate position offset from root to CoG in world frame
@@ -381,13 +425,13 @@ void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& cmd)
   // Set velocity targets
   setTargetVelX(des_cog_vel_world.x());
   setTargetVelY(des_cog_vel_world.y());
-  setTargetVelZ(des_cog_vel_world.z() + cmd.z_vel);  // Add world frame z command
+  setTargetVelZ(des_cog_vel_world.z() + root_cmd.z_vel);  // Add world frame z command
 
   // Set yaw velocity
   setTargetOmegaZ(des_root_omega_world.z());
 }
 
-void DragonCopilot::setPitchAttitudeTarget(const RootFrameCommand& cmd)
+void DragonCopilot::setPitchAttitudeTarget(const RootFrameCommand& root_cmd)
 {
   // Get current root yaw in world frame
   double root_r, root_p, root_y;
@@ -395,7 +439,7 @@ void DragonCopilot::setPitchAttitudeTarget(const RootFrameCommand& cmd)
 
   // Construct desired root orientation in world frame
   // Keep current yaw, apply commanded pitch, zero roll (level flight)
-  KDL::Rotation des_world_to_root_rotation = KDL::Rotation::RPY(0.0, cmd.pitch, root_y);
+  KDL::Rotation des_world_to_root_rotation = KDL::Rotation::RPY(0.0, root_cmd.pitch, root_y);
 
   // Calculate desired baselink orientation using rotation composition:
   // {}^{world}R_{baselink} = {}^{world}R_{root} * {}^{root}R_{baselink}
@@ -435,18 +479,20 @@ void DragonCopilot::setPitchAttitudeTarget(const RootFrameCommand& cmd)
   final_target_baselink_rot_.setRPY(curr_baselink_r, curr_baselink_p, 0);  // yaw=0 means yaw control via omega_z
 }
 
-std::vector<Eigen::Vector3d> DragonCopilot::copilotPlan(const KDL::JntArray& joint_positions)
+void DragonCopilot::copilotPlan(const RootFrameCommand& root_cmd)
 {
-  generateMincoTrajectory(joint_positions);
+  generateMincoTrajectory();
 
   visualizeTrajectory();
 
-  return computeLinkVel();
+  computeLinkVel();
+
+  generateJointCommands(root_cmd);
 }
 
-void DragonCopilot::generateMincoTrajectory(const KDL::JntArray& joint_positions)
+void DragonCopilot::generateMincoTrajectory()
 {
-  std::vector<Eigen::Vector3d> link_waypoints = calculateLinkWaypoints(joint_positions);
+  std::vector<Eigen::Vector3d> link_waypoints = calculateLinkWaypoints();
 
   Eigen::Matrix3d headState;
   headState.col(0) = link_waypoints[0];        // Initial position (link1 head)
@@ -471,7 +517,7 @@ void DragonCopilot::generateMincoTrajectory(const KDL::JntArray& joint_positions
   minco_.getTrajectory(current_trajectory_);  // the traj is in root frame
 }
 
-std::vector<Eigen::Vector3d> DragonCopilot::calculateLinkWaypoints(const KDL::JntArray& joint_positions)
+std::vector<Eigen::Vector3d> DragonCopilot::calculateLinkWaypoints()
 {
   std::vector<Eigen::Vector3d> link_waypoints;
   link_waypoints.reserve(link_num_ + 1);
@@ -480,10 +526,10 @@ std::vector<Eigen::Vector3d> DragonCopilot::calculateLinkWaypoints(const KDL::Jn
   // No need to recalculate world_to_baselink, root_to_baselink, baselink_to_root, world_to_root
 
   // Get positions for each link head (link1, link2, ..., linkN) in root frame, then convert to world frame
-  for (int i = 1; i <= link_num_; i++)
+  for (int i = 0; i < link_num_; i++)
   {
-    std::string link_name = "link" + std::to_string(i);
-    KDL::Frame link_frame = robot_model_->forwardKinematics<KDL::Frame>(link_name, joint_positions);
+    const std::string& link_name = link_names_[i];
+    KDL::Frame link_frame = robot_model_->forwardKinematics<KDL::Frame>(link_name, joint_positions_);
 
     // Transform from root frame to world frame
     KDL::Frame link_frame_world = world_to_root_ * link_frame;
@@ -494,8 +540,8 @@ std::vector<Eigen::Vector3d> DragonCopilot::calculateLinkWaypoints(const KDL::Jn
   }
 
   // Get last link frame and orientation
-  std::string last_link_name = "link" + std::to_string(link_num_);
-  KDL::Frame last_link_frame = robot_model_->forwardKinematics<KDL::Frame>(last_link_name, joint_positions);
+  const std::string& last_link_name = link_names_[link_num_ - 1];
+  KDL::Frame last_link_frame = robot_model_->forwardKinematics<KDL::Frame>(last_link_name, joint_positions_);
 
   // Calculate tail position: last link head + link_length_ * link_x_direction
   KDL::Vector link_x_direction = last_link_frame.M * KDL::Vector(1.0, 0.0, 0.0);  // x-axis in link frame
@@ -514,10 +560,10 @@ std::vector<Eigen::Vector3d> DragonCopilot::calculateLinkWaypoints(const KDL::Jn
   return link_waypoints;
 }
 
-std::vector<Eigen::Vector3d> DragonCopilot::computeLinkVel()
+void DragonCopilot::computeLinkVel()
 {
-  // Compute velocity directions for all links
-  std::vector<Eigen::Vector3d> link_velocity_directions;
+  // Clear previous velocity directions
+  link_vel_directions_.clear();
 
   for (int i = 1; i < link_num_; i++)  // Start from link2 (index 1)
   {
@@ -534,10 +580,34 @@ std::vector<Eigen::Vector3d> DragonCopilot::computeLinkVel()
       vel_direction = -vel / vel_norm;  // Negate to get opposite direction
     }
 
-    link_velocity_directions.push_back(vel_direction);
+    link_vel_directions_.push_back(vel_direction);
   }
+}
 
-  return link_velocity_directions;
+void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
+{
+  // Only publish joint control in HOVER_STATE to avoid conflicts with landing process
+  if (getNaviState() == HOVER_STATE)
+  {
+    sensor_msgs::JointState joint_control_msg;
+
+    // Debug print root_cmd
+    // ROS_INFO("[DragonCopilot] root_cmd - x_vel: %.3f, y_vel: %.3f, z_vel: %.3f, pitch: %.3f, yaw_vel: %.3f",
+    //          root_cmd.x_vel, root_cmd.y_vel, root_cmd.z_vel, root_cmd.pitch, root_cmd.yaw_vel);
+
+    // TODO: Implement joint control logic here
+    // For now, this is a minimal placeholder that does nothing
+    // Example structure (commented out):
+    // joint_control_msg.position.push_back(target_joint1_angle);
+    // joint_control_msg.position.push_back(target_joint2_angle);
+    // ...
+
+    // Uncomment the following line when ready to actually publish joint commands:
+    // joint_control_pub_.publish(joint_control_msg);
+
+    // Note: Joint control should be coordinated with pitch attitude control
+    // to ensure the robot's physical configuration matches the desired baselink attitude
+  }
 }
 
 void DragonCopilot::visualizeTrajectory()
