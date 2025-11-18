@@ -107,9 +107,9 @@ private:
    * considering root frame orientation and position offset from CoG, and sets the target
    * velocities and attitude for the control system.
    *
-   * @param cmd Root frame command structure containing velocity and attitude commands
+   * @param root_cmd Root frame command structure containing velocity and attitude commands
    */
-  void transformAndSetControlTargets(const RootFrameCommand& cmd);
+  void transformAndSetControlTargets(const RootFrameCommand& root_cmd);
 
   /**
    * @brief Generate MINCO trajectory and compute velocity directions for link control
@@ -118,42 +118,41 @@ private:
    * 1. Calculates 3D positions of all link heads and the last link tail using forward kinematics
    * 2. Generates a MINCO (Minimum Control) trajectory passing through these waypoints
    * 3. Computes velocity directions at each link head for joint control
-   * 4. Logs velocity information for debugging
+   * 4. Visualizes the trajectory in RViz
    *
+   * Uses the cached joint_positions_ member variable updated by updateTransformationCache().
    * The generated trajectory is stored in current_trajectory_ for later use in joint control.
    *
-   * @param joint_positions Current joint angles from robot model
-   * @return Vector of velocity directions (normalized) for each link starting from link2
+   * @param root_cmd Root frame command structure for debugging purposes
    */
-  std::vector<Eigen::Vector3d> copilotPlan(const KDL::JntArray& joint_positions);
+  void copilotPlan(const RootFrameCommand& root_cmd);
 
   /**
-   * @brief Compute and log velocity directions from the generated MINCO trajectory
+   * @brief Compute velocity directions from the generated MINCO trajectory
    *
    * This method computes the velocity direction (normalized velocity vector) at each link head
    * position along the generated trajectory. The directions are useful for determining the
    * desired joint angles to align each link with the trajectory.
    *
-   * Logging is throttled to once per second to avoid console spam.
-   *
-   * @return Vector of velocity directions (normalized) for each link starting from link2
+   * The computed velocity directions are stored in the class member link_vel_directions_.
    */
-  std::vector<Eigen::Vector3d> computeLinkVel();
+  void computeLinkVel();
 
   /**
    * @brief Calculate link waypoints from current joint positions
    *
    * This method computes 3D positions of all link heads and the tail position of the last link
-   * using forward kinematics. The waypoints are in root frame coordinates.
+   * using forward kinematics. The waypoints are in world frame coordinates.
+   *
+   * Uses the cached joint_positions_ member variable updated by updateTransformationCache().
    *
    * Waypoints include:
    * - Link1 head, Link2 head, ..., LinkN head
    * - Last link tail (computed as: last link head + link_length * link_x_direction)
    *
-   * @param joint_positions Current joint angles from robot model
    * @return Vector of waypoints (link_num + 1 waypoints total)
    */
-  std::vector<Eigen::Vector3d> calculateLinkWaypoints(const KDL::JntArray& joint_positions);
+  std::vector<Eigen::Vector3d> calculateLinkWaypoints();
 
   /**
    * @brief Generate MINCO trajectory from link waypoints
@@ -163,11 +162,10 @@ private:
    * 2. Sets up boundary conditions (position, velocity, acceleration)
    * 3. Generates the MINCO trajectory through all waypoints
    *
+   * Uses the cached joint_positions_ member variable updated by updateTransformationCache().
    * The generated trajectory is stored in current_trajectory_ member variable.
-   *
-   * @param joint_positions Current joint angles from robot model
    */
-  void generateMincoTrajectory(const KDL::JntArray& joint_positions);
+  void generateMincoTrajectory();
 
   /**
    * @brief Visualize the MINCO trajectory in RViz
@@ -220,12 +218,35 @@ private:
   KDL::Frame world_to_root_;       // Root frame in world coordinates
   KDL::JntArray joint_positions_;  // Current joint positions
 
+  /* Computed trajectory velocity directions */
+  std::vector<Eigen::Vector3d> link_vel_directions_;  // Velocity directions for each link (from link2)
+
+  /* Jacobians for each link frame */
+  // Jacobians map joint velocities to link frame velocities: v_link = J * q_dot
+  // Each Jacobian has 6 rows (linear xyz + angular xyz) and N columns (number of joints)
+  // link_jacobians_[i-1] contains the Jacobian for link{i} (i.e., index 0 = link1, index 1 = link2, etc.)
+  std::vector<KDL::Jacobian> link_jacobians_;
+
+  /* Cached variables for Jacobian computation (initialized once) */
+  std::unique_ptr<KDL::TreeJntToJacSolver> jac_solver_;  // KDL Jacobian solver
+  std::vector<int> link_joint_indices_;  // Indices of the 6 link joints in the full joint array
+  int num_joints_;  // Total number of joints in the robot tree
+  std::vector<std::string> link_names_;  // Pre-computed link names ("link1", "link2", ..., "linkN")
+
   /**
-   * @brief Update all cached transformations for current control cycle
+   * @brief Update all cached transformations and Jacobians for current control cycle
    *
    * This method should be called once at the beginning of each control cycle
-   * to update all transformation frames. This avoids redundant calculations
+   * to update all transformation frames and Jacobians. This avoids redundant calculations
    * across multiple functions.
+   *
+   * Updates:
+   * - All transformation frames (world_to_cog_, world_to_baselink_, root_to_baselink_, etc.)
+   * - Joint positions cache (joint_positions_)
+   * - Jacobians for all link heads (link_jacobians_)
+   *
+   * The Jacobians computed are with respect to the root frame and map joint velocities
+   * to link frame velocities (both linear and angular).
    */
   void updateTransformationCache();
 
@@ -238,9 +259,9 @@ private:
    *
    * Formula: v_cog = v_root + omega x (r_cog - r_root)
    *
-   * @param cmd Root frame command structure containing velocity and attitude commands
+   * @param root_cmd Root frame command structure containing velocity and attitude commands
    */
-  void setCoGVelocityTargets(const RootFrameCommand& cmd);
+  void setCoGVelocityTargets(const RootFrameCommand& root_cmd);
 
   /**
    * @brief Set pitch attitude target with smooth transition
@@ -251,8 +272,19 @@ private:
    *
    * The transformation follows: {}^{world}R_{baselink} = {}^{world}R_{root} * {}^{root}R_{baselink}
    *
-   * @param cmd Root frame command structure containing pitch attitude command
+   * @param root_cmd Root frame command structure containing pitch attitude command
    */
-  void setPitchAttitudeTarget(const RootFrameCommand& cmd);
+  void setPitchAttitudeTarget(const RootFrameCommand& root_cmd);
+
+  /**
+   * @brief Generate joint commands from link velocity directions
+   *
+   * This method converts the velocity directions of each link (computed from the MINCO trajectory)
+   * into joint angle commands. Uses the class member link_vel_directions_ computed by computeLinkVel().
+   * This is a placeholder implementation that will be replaced with actual joint control logic.
+   *
+   * @param root_cmd Root frame command structure for debugging purposes
+   */
+  void generateJointCommands(const RootFrameCommand& root_cmd);
 };
 };  // namespace aerial_robot_navigation
