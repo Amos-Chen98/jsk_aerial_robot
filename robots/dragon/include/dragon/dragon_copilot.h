@@ -139,6 +139,18 @@ private:
   void computeLinkVel();
 
   /**
+   * @brief Compute velocity directions in root frame from world frame velocity directions
+   *
+   * This method transforms the velocity directions computed by computeLinkVel() from world frame
+   * to root frame coordinates. This is useful for joint control since the robot kinematics
+   * are typically defined with respect to the root frame.
+   *
+   * The computed velocity directions in root frame are stored in link_vel_directions_root_.
+   * This method should be called after computeLinkVel().
+   */
+  void computeLinkVelRoot();
+
+  /**
    * @brief Calculate link waypoints from current joint positions
    *
    * This method computes 3D positions of all link heads and the tail position of the last link
@@ -219,7 +231,9 @@ private:
   KDL::JntArray joint_positions_;  // Current joint positions
 
   /* Computed trajectory velocity directions */
-  std::vector<Eigen::Vector3d> link_vel_directions_;  // Velocity directions for each link (from link2)
+  std::vector<Eigen::Vector3d> link_vel_directions_;  // Velocity directions for each link (from link2) in world frame
+  std::vector<Eigen::Vector3d> link_vel_directions_root_;  // Velocity directions for each link (from link2) in root
+                                                           // frame
 
   /* Jacobians for each link frame */
   // Jacobians map joint velocities to link frame velocities: v_link = J * q_dot
@@ -227,11 +241,21 @@ private:
   // link_jacobians_[i-1] contains the Jacobian for link{i} (i.e., index 0 = link1, index 1 = link2, etc.)
   std::vector<KDL::Jacobian> link_jacobians_;
 
+  // Linear parts of Jacobians (first 3 rows: x, y, z velocities)
+  // Pre-computed for efficiency to avoid repeated extraction in constraint generation
+  std::vector<Eigen::MatrixXd> link_jacobians_linear_;
+
+  /* Link frames (orientations) in root frame */
+  // Stores the transformation from root frame to each link frame
+  // link_frames_[i] contains the frame for link{i+1} (i.e., index 0 = link1, index 1 = link2, etc.)
+  std::vector<KDL::Frame> link_frames_;
+
   /* Cached variables for Jacobian computation (initialized once) */
   std::unique_ptr<KDL::TreeJntToJacSolver> jac_solver_;  // KDL Jacobian solver
-  std::vector<int> link_joint_indices_;  // Indices of the 6 link joints in the full joint array
-  int num_joints_;  // Total number of joints in the robot tree
-  std::vector<std::string> link_names_;  // Pre-computed link names ("link1", "link2", ..., "linkN")
+  std::vector<int> link_joint_indices_;                  // Indices of the 6 link joints in the full joint array
+  int num_joints_;                                       // Total number of joints in the robot tree
+  int num_link_joints_;                                  // Number of link joints (cached size of link_joint_indices_)
+  std::vector<std::string> link_names_;                  // Pre-computed link names ("link1", "link2", ..., "linkN")
 
   /**
    * @brief Update all cached transformations and Jacobians for current control cycle
