@@ -54,7 +54,8 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
   if (transformable_model)
   {
     link_joint_indices_ = transformable_model->getLinkJointIndices();
-    ROS_INFO("[DragonCopilot] Link joint indices initialized: %zu joints", link_joint_indices_.size());
+    num_link_joints_ = link_joint_indices_.size();
+    ROS_INFO("[DragonCopilot] Link joint indices initialized: %d joints", num_link_joints_);
   }
   else
   {
@@ -359,9 +360,13 @@ void DragonCopilot::updateTransformationCache()
   // Calculate world to root transform
   world_to_root_ = world_to_baselink_ * baselink_to_root_;
 
-  // Calculate Jacobians for each link head (link1 to linkN)
+  // Calculate Jacobians and link frames for each link head (link1 to linkN)
   link_jacobians_.clear();
   link_jacobians_.reserve(link_num_);
+  link_jacobians_linear_.clear();
+  link_jacobians_linear_.reserve(link_num_);
+  link_frames_.clear();
+  link_frames_.reserve(link_num_);
 
   // Check if Jacobian solver is initialized
   if (!jac_solver_ || link_joint_indices_.empty())
@@ -373,6 +378,10 @@ void DragonCopilot::updateTransformationCache()
   for (int i = 0; i < link_num_; i++)
   {
     const std::string& link_name = link_names_[i];
+
+    // Get link frame in root frame coordinates
+    KDL::Frame link_frame = robot_model_->forwardKinematics<KDL::Frame>(link_name, joint_positions_);
+    link_frames_.push_back(link_frame);
 
     // Create full Jacobian with appropriate size (6 rows x number of joints)
     KDL::Jacobian full_jacobian(num_joints_);
@@ -387,12 +396,12 @@ void DragonCopilot::updateTransformationCache()
     }
 
     // Extract only the columns corresponding to the 6 link joints
-    // Create a reduced Jacobian with 6 rows (3 linear + 3 angular) and link_joint_indices_.size() columns
-    KDL::Jacobian reduced_jacobian(link_joint_indices_.size());
+    // Create a reduced Jacobian with 6 rows (3 linear + 3 angular) and num_link_joints_ columns
+    KDL::Jacobian reduced_jacobian(num_link_joints_);
 
     for (size_t row = 0; row < 6; row++)
     {
-      for (size_t col_idx = 0; col_idx < link_joint_indices_.size(); col_idx++)
+      for (size_t col_idx = 0; col_idx < static_cast<size_t>(num_link_joints_); col_idx++)
       {
         int joint_idx = link_joint_indices_[col_idx];
         reduced_jacobian(row, col_idx) = full_jacobian(row, joint_idx);
@@ -400,6 +409,10 @@ void DragonCopilot::updateTransformationCache()
     }
 
     link_jacobians_.push_back(reduced_jacobian);
+
+    // Extract and cache the linear part (first 3 rows) for efficiency
+    Eigen::MatrixXd linear_jacobian = reduced_jacobian.data.block(0, 0, 3, num_link_joints_);
+    link_jacobians_linear_.push_back(linear_jacobian);
   }
 }
 
@@ -486,6 +499,8 @@ void DragonCopilot::copilotPlan(const RootFrameCommand& root_cmd)
   visualizeTrajectory();
 
   computeLinkVel();
+
+  computeLinkVelRoot();
 
   generateJointCommands(root_cmd);
 }
@@ -584,30 +599,180 @@ void DragonCopilot::computeLinkVel()
   }
 }
 
+void DragonCopilot::computeLinkVelRoot()
+{
+  // Clear previous velocity directions in root frame
+  link_vel_directions_root_.clear();
+
+  // Get the rotation matrix from world to root frame
+  // world_to_root_ is already computed in updateTransformationCache()
+  KDL::Rotation world_to_root_rotation = world_to_root_.M;
+  KDL::Rotation root_to_world_rotation = world_to_root_rotation.Inverse();
+
+  // Transform each velocity direction from world frame to root frame
+  for (const auto& vel_world : link_vel_directions_)
+  {
+    // Convert Eigen::Vector3d to KDL::Vector
+    KDL::Vector vel_kdl_world(vel_world.x(), vel_world.y(), vel_world.z());
+
+    // Transform to root frame: v_root = R^T * v_world (inverse rotation)
+    KDL::Vector vel_kdl_root = root_to_world_rotation * vel_kdl_world;
+
+    // Convert back to Eigen::Vector3d
+    Eigen::Vector3d vel_root(vel_kdl_root.x(), vel_kdl_root.y(), vel_kdl_root.z());
+
+    link_vel_directions_root_.push_back(vel_root);
+  }
+}
+
 void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
 {
   // Only publish joint control in HOVER_STATE to avoid conflicts with landing process
-  if (getNaviState() == HOVER_STATE)
+  if (getNaviState() != HOVER_STATE)
   {
-    sensor_msgs::JointState joint_control_msg;
-
-    // Debug print root_cmd
-    // ROS_INFO("[DragonCopilot] root_cmd - x_vel: %.3f, y_vel: %.3f, z_vel: %.3f, pitch: %.3f, yaw_vel: %.3f",
-    //          root_cmd.x_vel, root_cmd.y_vel, root_cmd.z_vel, root_cmd.pitch, root_cmd.yaw_vel);
-
-    // TODO: Implement joint control logic here
-    // For now, this is a minimal placeholder that does nothing
-    // Example structure (commented out):
-    // joint_control_msg.position.push_back(target_joint1_angle);
-    // joint_control_msg.position.push_back(target_joint2_angle);
-    // ...
-
-    // Uncomment the following line when ready to actually publish joint commands:
-    // joint_control_pub_.publish(joint_control_msg);
-
-    // Note: Joint control should be coordinated with pitch attitude control
-    // to ensure the robot's physical configuration matches the desired baselink attitude
+    return;
   }
+
+  // Check if we have valid Jacobians and velocity directions
+  if (link_jacobians_.empty() || link_vel_directions_root_.empty())
+  {
+    ROS_WARN_THROTTLE(1.0, "[DragonCopilot] Jacobians or velocity directions not computed yet");
+    return;
+  }
+
+  // ========== Step 1: Build constraint matrix A and target vector b ==========
+  // We want to minimize ||A * dq - b||^2
+  // where dq is the change in joint positions over one control cycle
+
+  // Constraint count:
+  // 1. Link1 x-velocity matching root command: 1 equation
+  // 2. Link compression constraints (k = 2, 3, ..., N): (N-1) equations
+  // 3. Link velocity direction alignment (k = 2, 3, ..., N): 2*(N-1) equations (y and z components)
+  // Total: 1 + (N-1) + 2*(N-1) = 3*N - 2 equations
+
+  const int num_constraints = 3 * link_num_ - 2;
+  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(num_constraints, num_link_joints_);
+  Eigen::VectorXd b = Eigen::VectorXd::Zero(num_constraints);
+
+  int constraint_idx = 0;
+
+  // ===== Constraint 1: Link1 x-velocity matching root command =====
+  // We want: (J_1 * dq)[0] = root_cmd.x_vel * dt
+  // where [0] means the x-component (row 0) of the 6D velocity vector
+  A.row(constraint_idx) = link_jacobians_[0].data.row(0);  // x-component of link1 velocity
+  b(constraint_idx) = root_cmd.x_vel * loop_du_;
+  constraint_idx++;
+
+  // ===== Constraint 2: Link compression constraints =====
+  // For consecutive links, we want to prevent compression/extension along each link's local x-axis.
+  // For link i, its x-axis direction in root frame is: axis_i = R_i * [1, 0, 0]^T
+  // where R_i is the rotation matrix of link i.
+  // The constraint is: (v_{link_i} - v_{link_{i+1}}) · axis_i = 0
+  // where v_{link_i} = J_i * dq (velocity of link i head in root frame)
+  //
+  // Expanding: (J_i * dq - J_{i+1} * dq) · axis_i = 0
+  //           => ((J_i - J_{i+1}) * dq) · axis_i = 0
+  //           => axis_i^T * (J_i - J_{i+1}) * dq = 0
+  //
+  // Since we only need the linear velocity components (first 3 rows of Jacobian):
+  //           => axis_i^T * ((J_i - J_{i+1})[0:2, :]) * dq = 0 (shape: (1,3) * (3,num_link_joints_) *
+  //           (num_link_joints_,1) = scalar)
+
+  for (int i = 0; i < link_num_ - 1; i++)
+  // Compare link i with link i+1 (i=0: link1 vs link2, ..., i=N-2: link{N-1} vs linkN)
+  {
+    // Get link i's x-axis direction in root frame
+    KDL::Vector link_x_axis_kdl = link_frames_[i].M * KDL::Vector(1.0, 0.0, 0.0);
+    Eigen::Vector3d link_x_axis(link_x_axis_kdl.x(), link_x_axis_kdl.y(), link_x_axis_kdl.z());
+
+    // Use pre-computed linear velocity Jacobians for consecutive links
+    const Eigen::MatrixXd& J_i_linear = link_jacobians_linear_[i];
+    const Eigen::MatrixXd& J_iplus1_linear = link_jacobians_linear_[i + 1];
+
+    // Construct the constraint: axis_i^T * (J_i - J_{i+1}) * dq = 0
+    Eigen::RowVectorXd constraint_row = link_x_axis.transpose() * (J_i_linear - J_iplus1_linear);
+
+    A.row(constraint_idx) = constraint_row;
+    b(constraint_idx) = 0.0;
+    constraint_idx++;
+  }
+
+  // ===== Constraint 3: Link velocity direction alignment =====
+  // For link k (k = 2, 3, ..., N), we want the 3D velocity direction to align with
+  // the desired trajectory velocity direction (link_vel_directions_root_).
+  // Let d_k = link_vel_directions_root_[k-2] (desired direction for link k, where k=2 corresponds to index 0)
+  // Let v_k = J_k * dq be the velocity of link k head
+  //
+  // To enforce alignment without division, we use the cross-product formulation:
+  // If v_k is parallel to d_k, then v_k x d_k = 0
+  // This gives us 3 equations, but only 2 are independent (the third is redundant)
+  //
+  // We use the first 2 components of the cross product:
+  // 1. (v_k x d_k)[0] = v_k[1] * d_k[2] - v_k[2] * d_k[1] = 0
+  //    => (J_k * dq)[1] * d_k[2] - (J_k * dq)[2] * d_k[1] = 0
+  // 2. (v_k x d_k)[1] = v_k[2] * d_k[0] - v_k[0] * d_k[2] = 0
+  //    => (J_k * dq)[2] * d_k[0] - (J_k * dq)[0] * d_k[2] = 0
+  //
+  // Equivalently:
+  // 1. d_k[2] * (J_k * dq)[1] - d_k[1] * (J_k * dq)[2] = 0
+  // 2. d_k[0] * (J_k * dq)[2] - d_k[2] * (J_k * dq)[0] = 0
+
+  for (int k = 1; k < link_num_; k++)  // k = 1, 2, ..., N-1 (corresponds to link2, link3, ..., linkN)
+  {
+    const Eigen::Vector3d& desired_dir = link_vel_directions_root_[k - 1];  // link2 -> index 0
+
+    // Use pre-computed linear Jacobian rows for x, y, and z velocity components
+    const Eigen::MatrixXd& J_k_linear = link_jacobians_linear_[k];
+    Eigen::RowVectorXd J_k_x = J_k_linear.row(0);
+    Eigen::RowVectorXd J_k_y = J_k_linear.row(1);
+    Eigen::RowVectorXd J_k_z = J_k_linear.row(2);
+
+    // First cross-product constraint: d_k[2] * v_k[1] - d_k[1] * v_k[2] = 0
+    A.row(constraint_idx) = desired_dir.z() * J_k_y - desired_dir.y() * J_k_z;
+    b(constraint_idx) = 0.0;
+    constraint_idx++;
+
+    // Second cross-product constraint: d_k[0] * v_k[2] - d_k[2] * v_k[0] = 0
+    A.row(constraint_idx) = desired_dir.x() * J_k_z - desired_dir.z() * J_k_x;
+    b(constraint_idx) = 0.0;
+    constraint_idx++;
+  }
+
+  // ========== Step 2: Solve the least-squares problem ==========
+  // We want to find dq that minimizes ||A * dq - b||^2
+  // The solution is: dq = (A^T * A)^(-1) * A^T * b = A^+ * b
+  // where A^+ is the Moore-Penrose pseudoinverse
+
+  Eigen::VectorXd dq = A.completeOrthogonalDecomposition().solve(b);
+
+  // ========== Step 3: Compute target joint positions ==========
+  // target_joint_positions = current_joint_positions + dq
+  // Note: joint_positions_ is a KDL::JntArray, we need to convert to Eigen and extract link joints
+
+  Eigen::VectorXd current_link_joint_positions(num_link_joints_);
+  for (int i = 0; i < num_link_joints_; i++)
+  {
+    int joint_idx = link_joint_indices_[i];
+    current_link_joint_positions(i) = joint_positions_(joint_idx);
+  }
+
+  Eigen::VectorXd target_link_joint_positions = current_link_joint_positions + dq;
+
+  // ========== Step 4: Publish joint command message ==========
+  sensor_msgs::JointState joint_control_msg;
+
+  // The target_link_joint_positions vector is already ordered according to link_joint_indices_
+  // We just need to populate the joint control message with these target positions
+  joint_control_msg.position.resize(num_link_joints_);
+  for (int i = 0; i < num_link_joints_; i++)
+  {
+    joint_control_msg.position[i] = target_link_joint_positions(i);
+  }
+
+  joint_control_pub_.publish(joint_control_msg);
+
+  // Debug output (throttled to avoid spamming)
+  ROS_DEBUG_THROTTLE(1.0, "[DragonCopilot] Published joint commands: dq_norm=%.4f", dq.norm());
 }
 
 void DragonCopilot::visualizeTrajectory()
