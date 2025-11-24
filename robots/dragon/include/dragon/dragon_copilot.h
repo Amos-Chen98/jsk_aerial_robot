@@ -192,50 +192,44 @@ private:
    */
   void visualizeTrajectory();
 
-  /* copilot specific parameters */
+  /* ===== Copilot Control Parameters ===== */
   double max_copilot_x_vel_;        // maximum forward/backward velocity
   double max_copilot_y_vel_;        // maximum lateral velocity
   double max_copilot_z_vel_;        // maximum vertical velocity
   double max_copilot_yaw_vel_;      // maximum yaw angular velocity
   double max_copilot_pitch_angle_;  // maximum pitch angle for attitude control
+  double trigger_deadzone_;         // deadzone for L2/R2 triggers
 
-  double trigger_deadzone_;  // deadzone for L2/R2 triggers
-
-  /* trigger initialization tracking */
+  /* Joystick state tracking */
   bool r2_trigger_initialized_;  // true after R2 has been pressed at least once
   bool l2_trigger_initialized_;  // true after L2 has been pressed at least once
-
-  /* attitude hold when no joystick input */
   double last_commanded_pitch_;  // last pitch angle when there was joystick input
   bool hold_attitude_on_idle_;   // flag to enable attitude hold when no input (default: true)
 
-  /* MINCO trajectory generation */
-  minco::MINCO_S3NU minco_;           // MINCO trajectory generator for minimum jerk (s=3)
-  Trajectory<5> current_trajectory_;  // Current trajectory being executed
+  /* ===== Robot Model Parameters (initialized once) ===== */
+  int link_num_;                                         // Number of robot links (equals rotor number)
+  double link_length_;                                   // Length of each link segment [m]
+  int moveable_joint_num_;                               // Number of moveable joints (excluding rotor joints)
+  int kdl_tree_joint_num_;                               // Total number of joints in the robot tree
+  int link_joint_num_;                                   // Number of link joints (cached size of link_joint_indices_)
+  std::vector<int> link_joint_indices_;                  // Indices of the 6 link joints in the full joint array
+  std::vector<std::string> link_names_;                  // Pre-computed link names ("link1", "link2", ..., "linkN")
+  std::unique_ptr<KDL::TreeJntToJacSolver> jac_solver_;  // KDL Jacobian solver
 
-  /* MINCO parameters */
-  // For Dragon: piece_num = link_num, total waypoints = link_num + 1
-  // Each piece represents one link segment with 1 second duration
-  int link_num_;        // Number of robot links (equals rotor number)
-  double link_length_;  // Length of each link segment [m]
-
-  /* Visualization */
-  ros::Publisher trajectory_viz_pub_;  // Publisher for trajectory visualization (path and markers)
-
-  /* Cached transformations (updated once per control cycle) */
+  /* ===== Cached State (updated once per control cycle) ===== */
+  // Transformation frames
   KDL::Frame world_to_cog_;        // CoG frame in world coordinates
   KDL::Frame world_to_baselink_;   // Baselink frame in world coordinates
+  KDL::Frame world_to_root_;       // Root frame in world coordinates
   KDL::Frame root_to_baselink_;    // Transform from root (link1) to baselink (FC)
   KDL::Frame baselink_to_root_;    // Transform from baselink to root
-  KDL::Frame world_to_root_;       // Root frame in world coordinates
   KDL::JntArray joint_positions_;  // Current joint positions
 
-  /* Computed trajectory velocity directions */
-  std::vector<Eigen::Vector3d> link_vel_directions_;  // Velocity directions for each link (from link2) in world frame
-  std::vector<Eigen::Vector3d> link_vel_directions_root_;  // Velocity directions for each link (from link2) in root
-                                                           // frame
+  // Link frames (orientations) in root frame
+  // link_frames_[i] contains the frame for link{i+1} (i.e., index 0 = link1, index 1 = link2, etc.)
+  std::vector<KDL::Frame> link_frames_;
 
-  /* Jacobians for each link frame */
+  // Jacobians for each link frame
   // Jacobians map joint velocities to link frame velocities: v_link = J * q_dot
   // Each Jacobian has 6 rows (linear xyz + angular xyz) and N columns (number of joints)
   // link_jacobians_[i-1] contains the Jacobian for link{i} (i.e., index 0 = link1, index 1 = link2, etc.)
@@ -245,17 +239,17 @@ private:
   // Pre-computed for efficiency to avoid repeated extraction in constraint generation
   std::vector<Eigen::MatrixXd> link_jacobians_linear_;
 
-  /* Link frames (orientations) in root frame */
-  // Stores the transformation from root frame to each link frame
-  // link_frames_[i] contains the frame for link{i+1} (i.e., index 0 = link1, index 1 = link2, etc.)
-  std::vector<KDL::Frame> link_frames_;
+  /* ===== MINCO Trajectory ===== */
+  minco::MINCO_S3NU minco_;           // MINCO trajectory generator for minimum jerk (s=3)
+  Trajectory<5> current_trajectory_;  // Current trajectory being executed
 
-  /* Cached variables for Jacobian computation (initialized once) */
-  std::unique_ptr<KDL::TreeJntToJacSolver> jac_solver_;  // KDL Jacobian solver
-  std::vector<int> link_joint_indices_;                  // Indices of the 6 link joints in the full joint array
-  int num_joints_;                                       // Total number of joints in the robot tree
-  int num_link_joints_;                                  // Number of link joints (cached size of link_joint_indices_)
-  std::vector<std::string> link_names_;                  // Pre-computed link names ("link1", "link2", ..., "linkN")
+  // Computed trajectory velocity directions
+  std::vector<Eigen::Vector3d> link_vel_directions_;  // Velocity directions for each link (from link2) in world frame
+  std::vector<Eigen::Vector3d> link_vel_directions_root_;  // Velocity directions for each link (from link2) in root
+                                                           // frame
+
+  /* ===== ROS Communication ===== */
+  ros::Publisher trajectory_viz_pub_;  // Publisher for trajectory visualization (path and markers)
 
   /**
    * @brief Update all cached transformations and Jacobians for current control cycle
