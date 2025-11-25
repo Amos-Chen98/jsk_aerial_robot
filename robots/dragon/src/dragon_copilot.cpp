@@ -38,6 +38,36 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
   ROS_INFO("[DragonCopilot] Moveable joint num: %d", moveable_joint_num_);
   ROS_INFO("[DragonCopilot] Link num: %d", link_num_);
 
+  /* Print KDL Jacobian joint names in column order */
+  //   ROS_INFO("[DragonCopilot] KDL Jacobian column ordering:");
+  //   std::vector<std::string> kdl_joint_names;
+
+  //   // Traverse the tree to get joint names in KDL's internal ordering
+  //   // KDL stores joints in the order they appear during tree traversal
+  //   std::function<void(const KDL::SegmentMap::const_iterator&)> traverseTree;
+  //   traverseTree = [&](const KDL::SegmentMap::const_iterator& segment_it) {
+  //     const KDL::Joint& joint = segment_it->second.segment.getJoint();
+  //     if (joint.getType() != KDL::Joint::None)
+  //     {
+  //       kdl_joint_names.push_back(joint.getName());
+  //     }
+
+  //     // Recursively traverse children
+  //     for (const auto& child : segment_it->second.children)
+  //     {
+  //       traverseTree(child);
+  //     }
+  //   };
+
+  //   // Start traversal from root
+  //   traverseTree(tree.getRootSegment());
+
+  //   // Print joint names with their column indices
+  //   for (size_t i = 0; i < kdl_joint_names.size(); i++)
+  //   {
+  //     ROS_INFO("[DragonCopilot]   Column %zu: %s", i, kdl_joint_names[i].c_str());
+  //   }
+
   /* Get link_length from transformable robot model */
   auto transformable_model = boost::dynamic_pointer_cast<aerial_robot_model::transformable::RobotModel>(robot_model_);
   if (transformable_model)
@@ -364,11 +394,13 @@ void DragonCopilot::updateTransformationCache()
   // Calculate world to root transform
   world_to_root_ = world_to_baselink_ * baselink_to_root_;
 
-  // Calculate Jacobians and link frames for each link head (link1 to linkN)
+  // Calculate Jacobians for link3 to linkN heads (for link2 to link(N-1) tails)
+  // Plus one additional Jacobian for linkN's tail
+  // Total: (N-2) + 1 = N-1 Jacobians
   link_jacobians_.clear();
-  link_jacobians_.reserve(link_num_);
+  link_jacobians_.reserve(link_num_ - 1);  // link3 to linkN heads + linkN tail
   link_jacobians_linear_.clear();
-  link_jacobians_linear_.reserve(link_num_);
+  link_jacobians_linear_.reserve(link_num_ - 1);  // link3 to linkN heads + linkN tail
   link_frames_.clear();
   link_frames_.reserve(link_num_);
 
@@ -379,6 +411,7 @@ void DragonCopilot::updateTransformationCache()
     return;
   }
 
+  // First, compute all link frames (needed for linkN tail calculation)
   for (int i = 0; i < link_num_; i++)
   {
     const std::string& link_name = link_names_[i];
@@ -413,11 +446,95 @@ void DragonCopilot::updateTransformationCache()
       }
     }
 
-    link_jacobians_.push_back(reduced_jacobian);
+    // Only store Jacobians from link3 onwards (for link2_tail to link(N-1)_tail)
+    if (i >= 2)  // i=2 corresponds to link3 (index starts from 0)
+    {
+      link_jacobians_.push_back(reduced_jacobian);
 
-    // Extract and cache the linear part (first 3 rows) for efficiency
-    Eigen::MatrixXd linear_jacobian = reduced_jacobian.data.block(0, 0, 3, link_joint_num_);
-    link_jacobians_linear_.push_back(linear_jacobian);
+      // Extract and cache the linear part (first 3 rows) for efficiency
+      Eigen::MatrixXd linear_jacobian = reduced_jacobian.data.block(0, 0, 3, link_joint_num_);
+      link_jacobians_linear_.push_back(linear_jacobian);
+    }
+  }
+
+  // ========== Compute Jacobian for linkN's tail ==========
+  // linkN tail position = linkN head position + link_length * linkN x-axis direction
+  const std::string& last_link_name = link_names_[link_num_ - 1];
+  KDL::Frame last_link_frame = link_frames_[link_num_ - 1];
+
+  // Calculate tail position in root frame
+  KDL::Vector link_x_direction = last_link_frame.M * KDL::Vector(1.0, 0.0, 0.0);
+  KDL::Vector tail_position = last_link_frame.p + link_length_ * link_x_direction;
+
+  // Create a virtual frame at the tail position with same orientation as linkN
+  KDL::Frame tail_frame;
+  tail_frame.p = tail_position;
+  tail_frame.M = last_link_frame.M;
+
+  // Compute Jacobian at linkN head first
+  KDL::Jacobian full_jacobian_last_head(kdl_tree_joint_num_);
+  int status = jac_solver_->JntToJac(joint_positions_, full_jacobian_last_head, last_link_name);
+
+  if (status < 0)
+  {
+    ROS_WARN("[DragonCopilot] Failed to compute Jacobian for %s tail", last_link_name.c_str());
+  }
+  else
+  {
+    // For a point offset from the link frame, the Jacobian is:
+    // J_tail = J_head + [omega] * r
+    // where r is the offset vector from head to tail in world frame
+    // and [omega] is the skew-symmetric matrix of angular velocity
+
+    // Extract reduced Jacobian for linkN head
+    KDL::Jacobian reduced_jacobian_head(link_joint_num_);
+    for (int row = 0; row < 6; row++)
+    {
+      for (int col_idx = 0; col_idx < link_joint_num_; col_idx++)
+      {
+        int joint_idx = link_joint_indices_[col_idx];
+        reduced_jacobian_head(row, col_idx) = full_jacobian_last_head(row, joint_idx);
+      }
+    }
+
+    // Offset vector in root frame: from linkN head to linkN tail
+    KDL::Vector offset_root = link_length_ * link_x_direction;
+    Eigen::Vector3d offset_eigen(offset_root.x(), offset_root.y(), offset_root.z());
+
+    // Compute tail Jacobian: J_tail = J_head_linear + [J_head_angular × offset]
+    // For each column j (joint j):
+    //   v_tail_j = v_head_j + omega_j × offset
+    KDL::Jacobian reduced_jacobian_tail(link_joint_num_);
+
+    for (int col_idx = 0; col_idx < link_joint_num_; col_idx++)
+    {
+      // Linear velocity at head
+      Eigen::Vector3d v_head(reduced_jacobian_head(0, col_idx), reduced_jacobian_head(1, col_idx),
+                             reduced_jacobian_head(2, col_idx));
+
+      // Angular velocity
+      Eigen::Vector3d omega(reduced_jacobian_head(3, col_idx), reduced_jacobian_head(4, col_idx),
+                            reduced_jacobian_head(5, col_idx));
+
+      // Linear velocity at tail: v_tail = v_head + omega × offset
+      Eigen::Vector3d v_tail = v_head + omega.cross(offset_eigen);
+
+      // Fill in the tail Jacobian
+      reduced_jacobian_tail(0, col_idx) = v_tail(0);
+      reduced_jacobian_tail(1, col_idx) = v_tail(1);
+      reduced_jacobian_tail(2, col_idx) = v_tail(2);
+
+      // Angular part remains the same (rigid body)
+      reduced_jacobian_tail(3, col_idx) = omega(0);
+      reduced_jacobian_tail(4, col_idx) = omega(1);
+      reduced_jacobian_tail(5, col_idx) = omega(2);
+    }
+
+    link_jacobians_.push_back(reduced_jacobian_tail);
+
+    // Extract and cache the linear part for linkN tail
+    Eigen::MatrixXd linear_jacobian_tail = reduced_jacobian_tail.data.block(0, 0, 3, link_joint_num_);
+    link_jacobians_linear_.push_back(linear_jacobian_tail);
   }
 }
 
@@ -585,13 +702,27 @@ void DragonCopilot::computeLinkVel()
   // Clear previous velocity directions
   link_vel_directions_.clear();
 
-  for (int i = 1; i < link_num_; i++)  // Start from link2 (index 1)
+  // Compute velocity directions for link tails (starting from link2)
+  // link1 motion is determined by external input (root_cmd), so we only constrain:
+  // link2 tail = link3 head (at t=2.0)
+  // link3 tail = link4 head (at t=3.0)
+  // ...
+  // linkN tail (at t=N)
+  for (int i = 2; i <= link_num_; i++)  // i = 2, 3, ..., N (link2, link3, ..., linkN)
   {
-    // Time at which this link head appears in trajectory
-    // link2 is at t=1.0, link3 is at t=2.0, etc.
+    // Time at which this link tail appears in trajectory
+    // link2 tail is at t=2.0, link3 tail is at t=3.0, ..., linkN tail is at t=N
     double t = static_cast<double>(i);
 
     Eigen::Vector3d vel = current_trajectory_.getVel(t);
+
+    // For the last point (linkN tail), velocity might be zero (end condition of MINCO)
+    // In that case, use velocity slightly before the endpoint
+    if (vel.norm() < 1e-6 && i == link_num_)
+    {
+      // Use velocity at t - 0.1 for the endpoint
+      vel = current_trajectory_.getVel(t - 0.1);
+    }
 
     Eigen::Vector3d vel_direction = Eigen::Vector3d::Zero();
     double vel_norm = vel.norm();
@@ -650,7 +781,9 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
   // where dq is the change in joint positions over one control cycle
 
   // Constraint count:
-  // Link velocity direction alignment (k = 2, 3, ..., N): 2*(N-1) equations (x and y cross product components)
+  // Link tail velocity direction alignment (link2_tail, link3_tail, ..., linkN_tail): 2*(N-1) equations
+  // link1's motion is determined by external input, so we only constrain link2 to linkN
+  // Each link tail has 2 constraints (x and y cross product components to enforce direction)
   // Total: 2*(N-1) equations
 
   const int num_constraints = 2 * (link_num_ - 1);
@@ -672,12 +805,31 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
     }
   }
 
-  for (int k = 1; k < link_num_; k++)  // k = 1, 2, ..., N-1 (corresponds to link2, link3, ..., linkN)
+  // DEBUG: Output all Jacobians in root frame
+  std::cout << "[DragonCopilot] All Jacobians in root frame:" << std::endl;
+  for (size_t k = 0; k < link_jacobians_linear_.size(); k++)
   {
-    const Eigen::Vector3d& des_vel_eigen = link_vel_directions_[k - 1];  // Desired direction in world frame
+    std::cout << "  Jacobian[" << k << "] (link" << (k + 3) << " head";
+    if (k == link_jacobians_linear_.size() - 1)
+      std::cout << " / link" << link_num_ << " tail";
+    std::cout << "):" << std::endl;
+    std::cout << link_jacobians_linear_[k] << std::endl;
+  }
+
+  for (int k = 0; k < link_num_ - 1; k++)  // k = 0, 1, ..., N-2 (corresponds to link2, link3, ..., linkN)
+  {
+    // Get desired velocity direction for link(k+2)'s tail
+    // k=0 -> link2_tail (index 0 in link_vel_directions_)
+    // k=1 -> link3_tail (index 1 in link_vel_directions_)
+    // k=N-2 -> linkN_tail (index N-2 in link_vel_directions_)
+    const Eigen::Vector3d& des_vel_eigen = link_vel_directions_[k];  // Desired direction in world frame
     KDL::Vector des_vel(des_vel_eigen(0), des_vel_eigen(1), des_vel_eigen(2));
 
     // Transform Jacobian from root frame to world frame: Jac_world = R * Jac_root
+    // Use link(k+2)'s tail Jacobian:
+    // k=0: link2_tail = link3_head, use link_jacobians_linear_[0] (link3 head)
+    // k=1: link3_tail = link4_head, use link_jacobians_linear_[1] (link4 head)
+    // k=N-2: linkN_tail, use link_jacobians_linear_[N-2] (linkN tail)
     const Eigen::MatrixXd& Jac_root = link_jacobians_linear_[k];
     Eigen::MatrixXd Jac_world = R_world_to_root * Jac_root;
 
@@ -708,6 +860,30 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
   // The solution is: dq = (A^T * A)^(-1) * A^T * b = A^+ * b
   // where A^+ is the Moore-Penrose pseudoinverse
 
+  // DEBUG: Print constraint matrix rank and condition number
+  Eigen::JacobiSVD<Eigen::MatrixXd> svd(A, Eigen::ComputeThinU | Eigen::ComputeThinV);
+  Eigen::VectorXd singular_values = svd.singularValues();
+  int rank = 0;
+  double tolerance = 1e-10;
+  for (int i = 0; i < singular_values.size(); i++)
+  {
+    if (singular_values(i) > tolerance)
+      rank++;
+  }
+
+  std::cout << "[DragonCopilot] Constraint matrix A: " << A.rows() << "x" << A.cols() << std::endl;
+  std::cout << "[DragonCopilot] Matrix rank: " << rank << " (full rank would be " << std::min(A.rows(), A.cols()) << ")"
+            << std::endl;
+  std::cout << "[DragonCopilot] Singular values: " << singular_values.transpose() << std::endl;
+
+  // Check which joints are actually used in constraints
+  std::cout << "[DragonCopilot] Column norms of A (joint influence):" << std::endl;
+  for (int col = 0; col < A.cols(); col++)
+  {
+    double col_norm = A.col(col).norm();
+    std::cout << "  Joint " << col << " (idx " << link_joint_indices_[col] << "): " << col_norm << std::endl;
+  }
+
   Eigen::VectorXd dq = A.completeOrthogonalDecomposition().solve(b);
 
   // output dq directly
@@ -719,34 +895,31 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
   std::cout << "Root velocity cmd: [" << root_cmd.x_vel << ", " << root_cmd.y_vel << ", " << root_cmd.z_vel << "]"
             << std::endl;
 
-  // Link head velocities in world frame (considering root frame velocity)
-  std::cout << "[DragonCopilot] Following links velocities (world frame):" << std::endl;
-
-  for (int i = 1; i < link_num_; i++)
-  {
-    // Compute velocity in root frame: v_link_root = J_i * dq
-    Eigen::Vector3d vel_link_root = link_jacobians_linear_[i] * dq;
-
-    // Transform to world frame
-    Eigen::Vector3d vel_link_world = R_world_to_root * vel_link_root;
-
-    // Add root frame velocity to get total velocity in world frame
-    Eigen::Vector3d total_vel_world;
-    total_vel_world(0) = v_root_world.x() + vel_link_world(0);
-    total_vel_world(1) = v_root_world.y() + vel_link_world(1);
-    total_vel_world(2) = v_root_world.z() + vel_link_world(2);
-
-    std::cout << "  Link" << (i + 1) << " velocity: [" << total_vel_world(0) << ", " << total_vel_world(1) << ", "
-              << total_vel_world(2) << "]" << std::endl;
-  }
-
-  // MINCO trajectory velocity directions in world frame (from link2 onwards)
+  // MINCO trajectory velocity directions in world frame (for link2 to linkN tails)
   std::cout << "[DragonCopilot] MINCO velocity directions (world frame):" << std::endl;
   for (size_t i = 0; i < link_vel_directions_.size(); i++)
   {
     const Eigen::Vector3d& vel_dir_world = link_vel_directions_[i];
-    std::cout << "  Link" << (i + 2) << " direction: [" << vel_dir_world.x() << ", " << vel_dir_world.y() << ", "
+    std::cout << "  Link" << (i + 2) << " tail direction: [" << vel_dir_world.x() << ", " << vel_dir_world.y() << ", "
               << vel_dir_world.z() << "]" << std::endl;
+  }
+
+  // Debug: Print actual link tail velocities (link2 to linkN)
+  std::cout << "[DragonCopilot] Link tail velocities (world frame):" << std::endl;
+  for (int i = 1; i < link_num_; i++)  // i = 1, 2, ..., N-1 (link2, link3, ..., linkN)
+  {
+    // Compute tail velocity: v_tail = v_root + J * dq
+    // link2_tail (i=1) uses link_jacobians_linear_[0] (link3 head)
+    // link3_tail (i=2) uses link_jacobians_linear_[1] (link4 head)
+    // linkN_tail (i=N-1) uses link_jacobians_linear_[N-2] (linkN tail)
+    Eigen::Vector3d vel_tail_root = link_jacobians_linear_[i - 1] * dq;
+    Eigen::Vector3d vel_tail_world = R_world_to_root * vel_tail_root;
+    Eigen::Vector3d total_vel_tail_world;
+    total_vel_tail_world(0) = v_root_world.x() + vel_tail_world(0);
+    total_vel_tail_world(1) = v_root_world.y() + vel_tail_world(1);
+    total_vel_tail_world(2) = v_root_world.z() + vel_tail_world(2);
+    std::cout << "  Link" << (i + 1) << " tail velocity: [" << total_vel_tail_world(0) << ", "
+              << total_vel_tail_world(1) << ", " << total_vel_tail_world(2) << "]" << std::endl;
   }
 
   // Compute residual: A * dq - b
@@ -755,6 +928,7 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
   std::cout << "[DragonCopilot] Residual norm: " << residual.norm() << std::endl;
 
   std::cout << "----------------------------------------" << std::endl;
+  std::cout << std::endl;
 
   // ========== Step 3: Compute target joint positions ==========
   // target_joint_positions = current_joint_positions + dq
@@ -824,17 +998,29 @@ void DragonCopilot::visualizeTrajectory()
 
   marker_array.markers.push_back(trajectory_line);
 
-  // Create velocity direction arrows at each link
+  // Create velocity direction arrows at link tail positions
+  // Show arrows at: link2_tail (t=2), link3_tail (t=3), ..., linkN_tail (t=N)
   int arrow_id = 2;
-  for (int i = 1; i < link_num_; i++)  // Start from link2
+  for (int i = 2; i <= link_num_; i++)  // i = 2, 3, ..., N (link2, link3, ..., linkN tails)
   {
     double t = static_cast<double>(i);
     Eigen::Vector3d pos = current_trajectory_.getPos(t);
     Eigen::Vector3d vel = current_trajectory_.getVel(t);
 
-    // Only show arrow if velocity is significant
+    // For the last point (linkN tail), velocity might be zero (end condition)
+    // In that case, use velocity slightly before the endpoint
     if (vel.norm() < 1e-6)
-      continue;
+    {
+      if (i == link_num_)
+      {
+        // Use velocity at t - 0.1 for the endpoint
+        vel = current_trajectory_.getVel(t - 0.1);
+      }
+
+      // Skip if still no significant velocity
+      if (vel.norm() < 1e-6)
+        continue;
+    }
 
     visualization_msgs::Marker arrow_marker;
     arrow_marker.header.frame_id = "world";
