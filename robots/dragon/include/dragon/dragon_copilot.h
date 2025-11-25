@@ -239,6 +239,10 @@ private:
   // Pre-computed for efficiency to avoid repeated extraction in constraint generation
   std::vector<Eigen::MatrixXd> link_jacobians_linear_;
 
+  // Root frame velocity and rotation (cached for constraint generation)
+  Eigen::Matrix3d R_world_to_root_;  // Rotation matrix from world to root frame
+  KDL::Vector v_root_world_;         // Root velocity in world frame
+
   /* ===== MINCO Trajectory ===== */
   minco::MINCO_S3NU minco_;           // MINCO trajectory generator for minimum jerk (s=3)
   Trajectory<5> current_trajectory_;  // Current trajectory being executed
@@ -304,5 +308,63 @@ private:
    * @param root_cmd Root frame command structure for debugging purposes
    */
   void generateJointCommands(const RootFrameCommand& root_cmd);
+
+  /**
+   * @brief Build constraint matrix for joint velocity optimization
+   *
+   * Constructs the least-squares constraint matrix A and target vector b to enforce
+   * that each link tail moves in the desired direction from the MINCO trajectory.
+   * Uses cached R_world_to_root_ and v_root_world_ member variables.
+   *
+   * @param A Output constraint matrix (2*(N-1) x link_joint_num_)
+   * @param b Output target vector (2*(N-1) x 1)
+   */
+  void buildConstraintMatrix(Eigen::MatrixXd& A, Eigen::VectorXd& b);
+
+  /**
+   * @brief Solve least-squares problem for joint velocities
+   *
+   * Solves the optimization problem: minimize ||A * dq - b||^2
+   * using complete orthogonal decomposition for robustness.
+   *
+   * @param A Constraint matrix
+   * @param b Target vector
+   * @return dq Joint velocity solution
+   */
+  Eigen::VectorXd solveJointVelocities(const Eigen::MatrixXd& A, const Eigen::VectorXd& b);
+
+  /**
+   * @brief Print debug information about constraint matrix
+   *
+   * Outputs matrix rank, singular values, and per-joint influence to help
+   * diagnose optimization problems.
+   *
+   * @param A Constraint matrix
+   * @param dq Computed joint velocities
+   */
+  void debugPrintMatrixInfo(const Eigen::MatrixXd& A, const Eigen::VectorXd& dq);
+
+  /**
+   * @brief Print debug information about velocities and residuals
+   *
+   * Outputs root velocity commands, MINCO trajectory directions, actual link velocities,
+   * and optimization residuals for debugging.
+   * Uses cached R_world_to_root_ and v_root_world_ member variables.
+   *
+   * @param dq Computed joint velocities
+   * @param A Constraint matrix
+   * @param b Target vector
+   */
+  void debugPrintVelocityInfo(const Eigen::VectorXd& dq, const Eigen::MatrixXd& A, const Eigen::VectorXd& b);
+
+  /**
+   * @brief Publish joint position commands
+   *
+   * Computes target joint positions from current positions and velocities,
+   * then publishes the joint control message.
+   *
+   * @param dq Joint velocity increments
+   */
+  void publishJointCommands(const Eigen::VectorXd& dq);
 };
 };  // namespace aerial_robot_navigation

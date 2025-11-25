@@ -776,10 +776,38 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
     return;
   }
 
-  // ========== Step 1: Build constraint matrix A and target vector b ==========
-  // We want to minimize ||A * dq - b||^2
-  // where dq is the change in joint positions over one control cycle
+  // Step 1: Cache transformation and root velocity to member variables
+  KDL::Vector root_vel_body(root_cmd.x_vel, root_cmd.y_vel, root_cmd.z_vel);
+  KDL::Rotation world_to_root_rotation = world_to_root_.M;
+  v_root_world_ = world_to_root_rotation * root_vel_body;
 
+  // Convert rotation to Eigen matrix and cache
+  for (int i = 0; i < 3; i++)
+  {
+    for (int j = 0; j < 3; j++)
+    {
+      R_world_to_root_(i, j) = world_to_root_rotation(i, j);
+    }
+  }
+
+  // Step 2: Build constraint matrix A and target vector b
+  Eigen::MatrixXd A;
+  Eigen::VectorXd b;
+  buildConstraintMatrix(A, b);
+
+  // Step 3: Solve for joint velocities
+  Eigen::VectorXd dq = solveJointVelocities(A, b);
+
+  // Step 4: Debug output
+  debugPrintMatrixInfo(A, dq);
+  debugPrintVelocityInfo(dq, A, b);
+
+  // Step 5: Publish joint commands
+  publishJointCommands(dq);
+}
+
+void DragonCopilot::buildConstraintMatrix(Eigen::MatrixXd& A, Eigen::VectorXd& b)
+{
   // Constraint count:
   // Link tail velocity direction alignment (link2_tail, link3_tail, ..., linkN_tail): 2*(N-1) equations
   // link1's motion is determined by external input, so we only constrain link2 to linkN
@@ -787,23 +815,10 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
   // Total: 2*(N-1) equations
 
   const int num_constraints = 2 * (link_num_ - 1);
-  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(num_constraints, link_joint_num_);
-  Eigen::VectorXd b = Eigen::VectorXd::Zero(num_constraints);
+  A = Eigen::MatrixXd::Zero(num_constraints, link_joint_num_);
+  b = Eigen::VectorXd::Zero(num_constraints);
 
   int constraint_idx = 0;
-
-  KDL::Vector root_vel_body(root_cmd.x_vel, root_cmd.y_vel, root_cmd.z_vel);
-  KDL::Rotation world_to_root_rotation = world_to_root_.M;
-  KDL::Vector v_root_world = world_to_root_rotation * root_vel_body;
-
-  Eigen::Matrix3d R_world_to_root;  // {}^{world}R_{root}
-  for (int i = 0; i < 3; i++)
-  {
-    for (int j = 0; j < 3; j++)
-    {
-      R_world_to_root(i, j) = world_to_root_rotation(i, j);
-    }
-  }
 
   // DEBUG: Output all Jacobians in root frame
   std::cout << "[DragonCopilot] All Jacobians in root frame:" << std::endl;
@@ -831,9 +846,9 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
     // k=1: link3_tail = link4_head, use link_jacobians_linear_[1] (link4 head)
     // k=N-2: linkN_tail, use link_jacobians_linear_[N-2] (linkN tail)
     const Eigen::MatrixXd& Jac_root = link_jacobians_linear_[k];
-    Eigen::MatrixXd Jac_world = R_world_to_root * Jac_root;
+    Eigen::MatrixXd Jac_world = R_world_to_root_ * Jac_root;
 
-    KDL::Vector v_root_cross_d = v_root_world * des_vel;  // v_root_world × des_vel
+    KDL::Vector v_root_cross_d = v_root_world_ * des_vel;  // v_root_world × des_vel
 
     // vel_world = v_root_world + Jac_world * dq
     // We want: (v_root_world + Jac_world * dq) × des_vel = 0
@@ -854,13 +869,19 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
     b(constraint_idx) = -v_root_cross_d.y();
     constraint_idx++;
   }
+}
 
-  // ========== Step 2: Solve the least-squares problem ==========
-  // We want to find dq that minimizes ||A * dq - b||^2
+Eigen::VectorXd DragonCopilot::solveJointVelocities(const Eigen::MatrixXd& A, const Eigen::VectorXd& b)
+{
+  // Solve the least-squares problem: minimize ||A * dq - b||^2
   // The solution is: dq = (A^T * A)^(-1) * A^T * b = A^+ * b
   // where A^+ is the Moore-Penrose pseudoinverse
+  return A.completeOrthogonalDecomposition().solve(b);
+}
 
-  // DEBUG: Print constraint matrix rank and condition number
+void DragonCopilot::debugPrintMatrixInfo(const Eigen::MatrixXd& A, const Eigen::VectorXd& dq)
+{
+  // Print constraint matrix rank and condition number
   Eigen::JacobiSVD<Eigen::MatrixXd> svd(A, Eigen::ComputeThinU | Eigen::ComputeThinV);
   Eigen::VectorXd singular_values = svd.singularValues();
   int rank = 0;
@@ -884,15 +905,15 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
     std::cout << "  Joint " << col << " (idx " << link_joint_indices_[col] << "): " << col_norm << std::endl;
   }
 
-  Eigen::VectorXd dq = A.completeOrthogonalDecomposition().solve(b);
-
-  // output dq directly
   std::cout << "[DragonCopilot] dq: " << dq.transpose() << std::endl;
+}
 
-  // ========== Debug Output ==========
+void DragonCopilot::debugPrintVelocityInfo(const Eigen::VectorXd& dq, const Eigen::MatrixXd& A,
+                                           const Eigen::VectorXd& b)
+{
   // Root frame control commands
-  std::cout << "[DragonCopilot] Root Link velocity command:" << std::endl;
-  std::cout << "Root velocity cmd: [" << root_cmd.x_vel << ", " << root_cmd.y_vel << ", " << root_cmd.z_vel << "]"
+  std::cout << "[DragonCopilot] Root Link velocity (world frame):" << std::endl;
+  std::cout << "Root velocity: [" << v_root_world_.x() << ", " << v_root_world_.y() << ", " << v_root_world_.z() << "]"
             << std::endl;
 
   // MINCO trajectory velocity directions in world frame (for link2 to linkN tails)
@@ -904,7 +925,7 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
               << vel_dir_world.z() << "]" << std::endl;
   }
 
-  // Debug: Print actual link tail velocities (link2 to linkN)
+  // Print actual link tail velocities (link2 to linkN)
   std::cout << "[DragonCopilot] Link tail velocities (world frame):" << std::endl;
   for (int i = 1; i < link_num_; i++)  // i = 1, 2, ..., N-1 (link2, link3, ..., linkN)
   {
@@ -913,11 +934,11 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
     // link3_tail (i=2) uses link_jacobians_linear_[1] (link4 head)
     // linkN_tail (i=N-1) uses link_jacobians_linear_[N-2] (linkN tail)
     Eigen::Vector3d vel_tail_root = link_jacobians_linear_[i - 1] * dq;
-    Eigen::Vector3d vel_tail_world = R_world_to_root * vel_tail_root;
+    Eigen::Vector3d vel_tail_world = R_world_to_root_ * vel_tail_root;
     Eigen::Vector3d total_vel_tail_world;
-    total_vel_tail_world(0) = v_root_world.x() + vel_tail_world(0);
-    total_vel_tail_world(1) = v_root_world.y() + vel_tail_world(1);
-    total_vel_tail_world(2) = v_root_world.z() + vel_tail_world(2);
+    total_vel_tail_world(0) = v_root_world_.x() + vel_tail_world(0);
+    total_vel_tail_world(1) = v_root_world_.y() + vel_tail_world(1);
+    total_vel_tail_world(2) = v_root_world_.z() + vel_tail_world(2);
     std::cout << "  Link" << (i + 1) << " tail velocity: [" << total_vel_tail_world(0) << ", "
               << total_vel_tail_world(1) << ", " << total_vel_tail_world(2) << "]" << std::endl;
   }
@@ -929,11 +950,11 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
 
   std::cout << "----------------------------------------" << std::endl;
   std::cout << std::endl;
+}
 
-  // ========== Step 3: Compute target joint positions ==========
-  // target_joint_positions = current_joint_positions + dq
-  // Note: joint_positions_ is a KDL::JntArray, we need to convert to Eigen and extract link joints
-
+void DragonCopilot::publishJointCommands(const Eigen::VectorXd& dq)
+{
+  // Compute target joint positions: target = current + dq
   Eigen::VectorXd current_link_joint_positions(link_joint_num_);
   for (int i = 0; i < link_joint_num_; i++)
   {
@@ -943,11 +964,8 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
 
   Eigen::VectorXd target_link_joint_positions = current_link_joint_positions + dq;
 
-  // ========== Step 4: Publish joint command message ==========
+  // Publish joint command message
   sensor_msgs::JointState joint_control_msg;
-
-  // The target_link_joint_positions vector is already ordered according to link_joint_indices_
-  // We just need to populate the joint control message with these target positions
   joint_control_msg.position.resize(link_joint_num_);
   for (int i = 0; i < link_joint_num_; i++)
   {
@@ -956,7 +974,6 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
 
   joint_control_pub_.publish(joint_control_msg);
 
-  // Debug output (throttled to avoid spamming)
   ROS_DEBUG_THROTTLE(1.0, "[DragonCopilot] Published joint commands: dq_norm=%.4f", dq.norm());
 }
 
