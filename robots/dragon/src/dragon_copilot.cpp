@@ -1,6 +1,7 @@
 #include <dragon/dragon_copilot.h>
 #include <aerial_robot_control/util/joy_parser.h>
 #include <tf_conversions/tf_kdl.h>
+#include <nav_msgs/Odometry.h>
 
 using namespace aerial_robot_model;
 using namespace aerial_robot_navigation;
@@ -102,6 +103,15 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
 
   /* Initialize trajectory visualization publisher */
   trajectory_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("copilot/trajectory_visualization", 1);
+
+  /* Initialize root frame odometry publisher */
+  root_frame_odom_pub_ = nh_.advertise<nav_msgs::Odometry>("copilot/root_frame_odom", 1);
+
+  /* Initialize cached velocities */
+  root_vel_body_ = KDL::Vector::Zero();
+  root_vel_world_ = KDL::Vector::Zero();
+  root_omega_body_ = KDL::Vector::Zero();
+  root_omega_world_ = KDL::Vector::Zero();
 }
 
 void DragonCopilot::rosParamInit()
@@ -228,6 +238,9 @@ void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
 
   /* Transform velocity commands and set control targets */
   transformAndSetControlTargets(root_cmd);
+
+  /* Publish root frame odometry (position and velocity in world frame) */
+  publishRootFrameOdom();
 }
 
 RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_cmd)
@@ -349,20 +362,35 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& root_c
   // - Baselink frame: the FC (flight controller) frame, what the controller uses
   // - CoG: center of gravity, what the controller actually tracks
 
-  // ===== Step 1: Update transformation cache (all frames computed once) =====
-  updateTransformationCache();
+  // ===== Step 1: Cache transformations (all frames computed once) =====
+  cacheTransformations();
 
-  // ===== Step 2: Compute and set CoG velocity targets =====
+  // ===== Step 2: Cache root frame velocities (computed once, used by multiple functions) =====
+  cacheRootFrameVelocities(root_cmd);
+
+  // ===== Step 3: Compute and set CoG velocity targets =====
   setCoGVelocityTargets(root_cmd);
 
-  // ===== Step 3: Update baselink attitude target from pitch velocity command =====
+  // ===== Step 4: Update baselink attitude target from pitch velocity command =====
   setBaselinkAttitudeTarget(root_cmd);
 
   // ===== Step 4: Plan the movement of following links and publish joint control commands =====
   //   copilotPlan(root_cmd);
 }
 
-void DragonCopilot::updateTransformationCache()
+void DragonCopilot::cacheTransformations()
+{
+  // Step 1: Cache frame transformations and link frames
+  cacheFrameTransforms();
+
+  // Step 2: Compute and cache Jacobians for link heads
+  cacheJacobians();
+
+  // Step 3: Compute Jacobian for the last link's tail
+  cacheLastLinkTailJacobian();
+}
+
+void DragonCopilot::cacheFrameTransforms()
 {
   // Get current joint positions
   joint_positions_ = robot_model_->getJointPositions();
@@ -386,15 +414,36 @@ void DragonCopilot::updateTransformationCache()
   // Calculate world to root transform
   world_to_root_ = world_to_baselink_ * baselink_to_root_;
 
-  // Calculate Jacobians for link3 to linkN heads (for link2 to link(N-1) tails)
-  // Plus one additional Jacobian for linkN's tail
-  // Total: (N-2) + 1 = N-1 Jacobians
+  // Cache rotation matrix for other computations (e.g., Jacobian transformation)
+  KDL::Rotation world_to_root_rotation = world_to_root_.M;
+  for (int i = 0; i < 3; i++)
+  {
+    for (int j = 0; j < 3; j++)
+    {
+      R_world_to_root_(i, j) = world_to_root_rotation(i, j);
+    }
+  }
+
+  // Cache all link frames using forward kinematics
+  link_frames_.clear();
+  link_frames_.reserve(link_num_);
+
+  for (int i = 0; i < link_num_; i++)
+  {
+    const std::string& link_name = link_names_[i];
+
+    // Get link frame in root frame coordinates
+    KDL::Frame link_frame = robot_model_->forwardKinematics<KDL::Frame>(link_name, joint_positions_);
+    link_frames_.push_back(link_frame);
+  }
+}
+
+void DragonCopilot::cacheJacobians()
+{
   link_jacobians_.clear();
   link_jacobians_.reserve(link_num_ - 1);  // link3 to linkN heads + linkN tail
   link_jacobians_linear_.clear();
-  link_jacobians_linear_.reserve(link_num_ - 1);  // link3 to linkN heads + linkN tail
-  link_frames_.clear();
-  link_frames_.reserve(link_num_);
+  link_jacobians_linear_.reserve(link_num_ - 1);
 
   // Check if Jacobian solver is initialized
   if (!jac_solver_ || link_joint_indices_.empty())
@@ -403,17 +452,12 @@ void DragonCopilot::updateTransformationCache()
     return;
   }
 
-  // First, compute all link frames (needed for linkN tail calculation)
+  // Compute Jacobians for all links, but only store from link3 onwards
   for (int i = 0; i < link_num_; i++)
   {
     const std::string& link_name = link_names_[i];
 
-    // Get link frame in root frame coordinates
-    KDL::Frame link_frame = robot_model_->forwardKinematics<KDL::Frame>(link_name, joint_positions_);
-    link_frames_.push_back(link_frame);
-
     // Create full Jacobian with appropriate size (6 rows x kdl_tree_joint_num_ columns)
-    // Note: KDL::TreeJntToJacSolver requires Jacobian size to match tree.getNrOfJoints()
     KDL::Jacobian full_jacobian(kdl_tree_joint_num_);
 
     // Compute full Jacobian for this link frame with respect to root frame
@@ -425,8 +469,7 @@ void DragonCopilot::updateTransformationCache()
       continue;
     }
 
-    // Extract only the columns corresponding to the 6 link joints
-    // Create a reduced Jacobian with 6 rows (3 linear + 3 angular) and link_joint_num_ columns
+    // Extract only the columns corresponding to the link joints
     KDL::Jacobian reduced_jacobian(link_joint_num_);
 
     for (int row = 0; row < 6; row++)
@@ -448,20 +491,16 @@ void DragonCopilot::updateTransformationCache()
       link_jacobians_linear_.push_back(linear_jacobian);
     }
   }
+}
 
-  // ========== Compute Jacobian for linkN's tail ==========
+void DragonCopilot::cacheLastLinkTailJacobian()
+{
   // linkN tail position = linkN head position + link_length * linkN x-axis direction
   const std::string& last_link_name = link_names_[link_num_ - 1];
   KDL::Frame last_link_frame = link_frames_[link_num_ - 1];
 
-  // Calculate tail position in root frame
+  // Calculate tail position direction in root frame
   KDL::Vector link_x_direction = last_link_frame.M * KDL::Vector(1.0, 0.0, 0.0);
-  KDL::Vector tail_position = last_link_frame.p + link_length_ * link_x_direction;
-
-  // Create a virtual frame at the tail position with same orientation as linkN
-  KDL::Frame tail_frame;
-  tail_frame.p = tail_position;
-  tail_frame.M = last_link_frame.M;
 
   // Compute Jacobian at linkN head first
   KDL::Jacobian full_jacobian_last_head(kdl_tree_joint_num_);
@@ -470,92 +509,101 @@ void DragonCopilot::updateTransformationCache()
   if (status < 0)
   {
     ROS_WARN("[DragonCopilot] Failed to compute Jacobian for %s tail", last_link_name.c_str());
+    return;
   }
-  else
+
+  // Extract reduced Jacobian for linkN head
+  KDL::Jacobian reduced_jacobian_head(link_joint_num_);
+  for (int row = 0; row < 6; row++)
   {
-    // For a point offset from the link frame, the Jacobian is:
-    // J_tail = J_head + [omega] * r
-    // where r is the offset vector from head to tail in world frame
-    // and [omega] is the skew-symmetric matrix of angular velocity
-
-    // Extract reduced Jacobian for linkN head
-    KDL::Jacobian reduced_jacobian_head(link_joint_num_);
-    for (int row = 0; row < 6; row++)
-    {
-      for (int col_idx = 0; col_idx < link_joint_num_; col_idx++)
-      {
-        int joint_idx = link_joint_indices_[col_idx];
-        reduced_jacobian_head(row, col_idx) = full_jacobian_last_head(row, joint_idx);
-      }
-    }
-
-    // Offset vector in root frame: from linkN head to linkN tail
-    KDL::Vector offset_root = link_length_ * link_x_direction;
-    Eigen::Vector3d offset_eigen(offset_root.x(), offset_root.y(), offset_root.z());
-
-    // Compute tail Jacobian: J_tail = J_head_linear + [J_head_angular × offset]
-    // For each column j (joint j):
-    //   v_tail_j = v_head_j + omega_j × offset
-    KDL::Jacobian reduced_jacobian_tail(link_joint_num_);
-
     for (int col_idx = 0; col_idx < link_joint_num_; col_idx++)
     {
-      // Linear velocity at head
-      Eigen::Vector3d v_head(reduced_jacobian_head(0, col_idx), reduced_jacobian_head(1, col_idx),
-                             reduced_jacobian_head(2, col_idx));
-
-      // Angular velocity
-      Eigen::Vector3d omega(reduced_jacobian_head(3, col_idx), reduced_jacobian_head(4, col_idx),
-                            reduced_jacobian_head(5, col_idx));
-
-      // Linear velocity at tail: v_tail = v_head + omega × offset
-      Eigen::Vector3d v_tail = v_head + omega.cross(offset_eigen);
-
-      // Fill in the tail Jacobian
-      reduced_jacobian_tail(0, col_idx) = v_tail(0);
-      reduced_jacobian_tail(1, col_idx) = v_tail(1);
-      reduced_jacobian_tail(2, col_idx) = v_tail(2);
-
-      // Angular part remains the same (rigid body)
-      reduced_jacobian_tail(3, col_idx) = omega(0);
-      reduced_jacobian_tail(4, col_idx) = omega(1);
-      reduced_jacobian_tail(5, col_idx) = omega(2);
+      int joint_idx = link_joint_indices_[col_idx];
+      reduced_jacobian_head(row, col_idx) = full_jacobian_last_head(row, joint_idx);
     }
-
-    link_jacobians_.push_back(reduced_jacobian_tail);
-
-    // Extract and cache the linear part for linkN tail
-    Eigen::MatrixXd linear_jacobian_tail = reduced_jacobian_tail.data.block(0, 0, 3, link_joint_num_);
-    link_jacobians_linear_.push_back(linear_jacobian_tail);
   }
+
+  // Offset vector in root frame: from linkN head to linkN tail
+  KDL::Vector offset_root = link_length_ * link_x_direction;
+  Eigen::Vector3d offset_eigen(offset_root.x(), offset_root.y(), offset_root.z());
+
+  // Compute tail Jacobian: J_tail = J_head_linear + [J_head_angular × offset]
+  // For each column j (joint j): v_tail_j = v_head_j + omega_j × offset
+  KDL::Jacobian reduced_jacobian_tail(link_joint_num_);
+
+  for (int col_idx = 0; col_idx < link_joint_num_; col_idx++)
+  {
+    // Linear velocity at head
+    Eigen::Vector3d v_head(reduced_jacobian_head(0, col_idx), reduced_jacobian_head(1, col_idx),
+                           reduced_jacobian_head(2, col_idx));
+
+    // Angular velocity
+    Eigen::Vector3d omega(reduced_jacobian_head(3, col_idx), reduced_jacobian_head(4, col_idx),
+                          reduced_jacobian_head(5, col_idx));
+
+    // Linear velocity at tail: v_tail = v_head + omega × offset
+    Eigen::Vector3d v_tail = v_head + omega.cross(offset_eigen);
+
+    // Fill in the tail Jacobian
+    reduced_jacobian_tail(0, col_idx) = v_tail(0);
+    reduced_jacobian_tail(1, col_idx) = v_tail(1);
+    reduced_jacobian_tail(2, col_idx) = v_tail(2);
+
+    // Angular part remains the same (rigid body)
+    reduced_jacobian_tail(3, col_idx) = omega(0);
+    reduced_jacobian_tail(4, col_idx) = omega(1);
+    reduced_jacobian_tail(5, col_idx) = omega(2);
+  }
+
+  link_jacobians_.push_back(reduced_jacobian_tail);
+
+  // Extract and cache the linear part for linkN tail
+  Eigen::MatrixXd linear_jacobian_tail = reduced_jacobian_tail.data.block(0, 0, 3, link_joint_num_);
+  link_jacobians_linear_.push_back(linear_jacobian_tail);
+}
+
+void DragonCopilot::cacheRootFrameVelocities(const RootFrameCommand& root_cmd)
+{
+  // Cache root frame body velocities
+  // Note: x and y velocities are in root body frame, z velocity is in world frame
+  root_vel_body_ = KDL::Vector(root_cmd.x_vel, root_cmd.y_vel, 0.0);
+
+  // Transform to world frame
+  root_vel_world_ = world_to_root_.M * root_vel_body_;
+
+  // Add world frame z velocity component
+  root_vel_world_.z(root_vel_world_.z() + root_cmd.z_vel);
+
+  // Cache root frame angular velocities
+  // pitch_vel is around y-axis in body frame, yaw_vel is around z-axis
+  root_omega_body_ = KDL::Vector(0.0, root_cmd.pitch_vel, root_cmd.yaw_vel);
+
+  // Transform to world frame
+  root_omega_world_ = world_to_root_.M * root_omega_body_;
 }
 
 void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
 {
-  // Transform root frame body velocities to world frame
-  KDL::Vector root_vel_body(root_cmd.x_vel, root_cmd.y_vel, 0.0);
-  KDL::Vector des_root_vel_world = world_to_root_.M * root_vel_body;
-
-  // Transform root frame angular velocity to world frame
-  KDL::Vector root_omega_body(0.0, 0.0, root_cmd.yaw_vel);
-  KDL::Vector des_root_omega_world = world_to_root_.M * root_omega_body;
+  // Use cached root frame velocities (computed in cacheRootFrameVelocities)
+  // root_vel_world_ and root_omega_world_ are already available
+  // Note: root_vel_world_ already includes the z velocity component
 
   // Calculate position offset from root to CoG in world frame
   KDL::Vector root_to_cog_offset_world = world_to_cog_.p - world_to_root_.p;
 
   // Velocity contribution from rotation: omega x r
-  KDL::Vector vel_from_rotation = des_root_omega_world * root_to_cog_offset_world;
+  KDL::Vector vel_from_rotation = root_omega_world_ * root_to_cog_offset_world;
 
   // Final CoG velocity: v_cog = v_root + omega x (r_cog - r_root)
-  KDL::Vector des_cog_vel_world = des_root_vel_world + vel_from_rotation;
+  KDL::Vector des_cog_vel_world = root_vel_world_ + vel_from_rotation;
 
   // Set velocity targets
   setTargetVelX(des_cog_vel_world.x());
   setTargetVelY(des_cog_vel_world.y());
-  setTargetVelZ(des_cog_vel_world.z() + root_cmd.z_vel);  // Add world frame z command
+  setTargetVelZ(des_cog_vel_world.z());  // z velocity already included in root_vel_world_
 
   // Set yaw velocity
-  setTargetOmegaZ(des_root_omega_world.z());
+  setTargetOmegaZ(root_omega_world_.z());
 }
 
 void DragonCopilot::setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd)
@@ -781,33 +829,21 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
     return;
   }
 
-  // Step 1: Cache transformation and root velocity to member variables
-  KDL::Vector root_vel_body(root_cmd.x_vel, root_cmd.y_vel, root_cmd.z_vel);
-  KDL::Rotation world_to_root_rotation = world_to_root_.M;
-  v_root_world_ = world_to_root_rotation * root_vel_body;
+  // Note: root_vel_world_ and R_world_to_root_ are already cached by cacheRootFrameVelocities()
 
-  // Convert rotation to Eigen matrix and cache
-  for (int i = 0; i < 3; i++)
-  {
-    for (int j = 0; j < 3; j++)
-    {
-      R_world_to_root_(i, j) = world_to_root_rotation(i, j);
-    }
-  }
-
-  // Step 2: Build constraint matrix A and target vector b
+  // Step 1: Build constraint matrix A and target vector b
   Eigen::MatrixXd A;
   Eigen::VectorXd b;
   buildConstraintMatrix(A, b);
 
-  // Step 3: Solve for joint velocities
+  // Step 2: Solve for joint velocities
   Eigen::VectorXd dq = solveJointVelocities(A, b);
 
-  // Step 4: Debug output
+  // Step 3: Debug output
   debugPrintMatrixInfo(A, dq);
   debugPrintVelocityInfo(dq, A, b);
 
-  // Step 5: Publish joint commands
+  // Step 4: Publish joint commands
   publishJointCommands(dq);
 }
 
@@ -853,11 +889,11 @@ void DragonCopilot::buildConstraintMatrix(Eigen::MatrixXd& A, Eigen::VectorXd& b
     const Eigen::MatrixXd& Jac_root = link_jacobians_linear_[k];
     Eigen::MatrixXd Jac_world = R_world_to_root_ * Jac_root;
 
-    KDL::Vector v_root_cross_d = v_root_world_ * des_vel;  // v_root_world × des_vel
+    KDL::Vector v_root_cross_d = root_vel_world_ * des_vel;  // root_vel_world_ × des_vel
 
-    // vel_world = v_root_world + Jac_world * dq
-    // We want: (v_root_world + Jac_world * dq) × des_vel = 0
-    // => (Jac_world * dq) × des_vel = - (v_root_world × des_vel)
+    // vel_world = root_vel_world_ + Jac_world * dq
+    // We want: (root_vel_world_ + Jac_world * dq) × des_vel = 0
+    // => (Jac_world * dq) × des_vel = - (root_vel_world_ × des_vel)
     // => (Jac_world * dq) × des_vel = -v_root_cross_d
 
     // Cross product (Jac_world * dq) × des_vel:
@@ -918,8 +954,8 @@ void DragonCopilot::debugPrintVelocityInfo(const Eigen::VectorXd& dq, const Eige
 {
   // Root frame control commands
   std::cout << "[DragonCopilot] Root Link velocity (world frame):" << std::endl;
-  std::cout << "Root velocity: [" << v_root_world_.x() << ", " << v_root_world_.y() << ", " << v_root_world_.z() << "]"
-            << std::endl;
+  std::cout << "Root velocity: [" << root_vel_world_.x() << ", " << root_vel_world_.y() << ", " << root_vel_world_.z()
+            << "]" << std::endl;
 
   // MINCO trajectory velocity directions in world frame (for link2 to linkN tails)
   std::cout << "[DragonCopilot] MINCO velocity directions (world frame):" << std::endl;
@@ -938,14 +974,14 @@ void DragonCopilot::debugPrintVelocityInfo(const Eigen::VectorXd& dq, const Eige
     // link2_tail (i=1) uses link_jacobians_linear_[0] (link3 head)
     // link3_tail (i=2) uses link_jacobians_linear_[1] (link4 head)
     // linkN_tail (i=N-1) uses link_jacobians_linear_[N-2] (linkN tail)
-    Eigen::Vector3d vel_tail_root = link_jacobians_linear_[i - 1] * dq;
-    Eigen::Vector3d vel_tail_world = R_world_to_root_ * vel_tail_root;
-    Eigen::Vector3d total_vel_tail_world;
-    total_vel_tail_world(0) = v_root_world_.x() + vel_tail_world(0);
-    total_vel_tail_world(1) = v_root_world_.y() + vel_tail_world(1);
-    total_vel_tail_world(2) = v_root_world_.z() + vel_tail_world(2);
-    std::cout << "  Link" << (i + 1) << " tail velocity: [" << total_vel_tail_world(0) << ", "
-              << total_vel_tail_world(1) << ", " << total_vel_tail_world(2) << "]" << std::endl;
+    Eigen::Vector3d tail_vel_root = link_jacobians_linear_[i - 1] * dq;
+    Eigen::Vector3d tail_vel_world = R_world_to_root_ * tail_vel_root;
+    Eigen::Vector3d tail_total_vel_world;
+    tail_total_vel_world(0) = root_vel_world_.x() + tail_vel_world(0);
+    tail_total_vel_world(1) = root_vel_world_.y() + tail_vel_world(1);
+    tail_total_vel_world(2) = root_vel_world_.z() + tail_vel_world(2);
+    std::cout << "  Link" << (i + 1) << " tail velocity: [" << tail_total_vel_world(0) << ", "
+              << tail_total_vel_world(1) << ", " << tail_total_vel_world(2) << "]" << std::endl;
   }
 
   // Compute residual: A * dq - b
@@ -980,6 +1016,41 @@ void DragonCopilot::publishJointCommands(const Eigen::VectorXd& dq)
   joint_control_pub_.publish(joint_control_msg);
 
   ROS_DEBUG_THROTTLE(1.0, "[DragonCopilot] Published joint commands: dq_norm=%.4f", dq.norm());
+}
+
+void DragonCopilot::publishRootFrameOdom()
+{
+  nav_msgs::Odometry odom_msg;
+  odom_msg.header.stamp = ros::Time::now();
+  odom_msg.header.frame_id = "world";
+  odom_msg.child_frame_id = "root";  // root frame (link1)
+
+  // ===== Position from cached world_to_root_ transformation =====
+  odom_msg.pose.pose.position.x = world_to_root_.p.x();
+  odom_msg.pose.pose.position.y = world_to_root_.p.y();
+  odom_msg.pose.pose.position.z = world_to_root_.p.z();
+
+  // ===== Orientation from cached world_to_root_ transformation =====
+  double qx, qy, qz, qw;
+  world_to_root_.M.GetQuaternion(qx, qy, qz, qw);
+  odom_msg.pose.pose.orientation.x = qx;
+  odom_msg.pose.pose.orientation.y = qy;
+  odom_msg.pose.pose.orientation.z = qz;
+  odom_msg.pose.pose.orientation.w = qw;
+
+  // ===== Velocity: use cached velocities (assuming zero tracking error) =====
+  // Linear velocity in world frame (already computed in cacheRootFrameVelocities)
+  odom_msg.twist.twist.linear.x = root_vel_world_.x();
+  odom_msg.twist.twist.linear.y = root_vel_world_.y();
+  odom_msg.twist.twist.linear.z = root_vel_world_.z();
+
+  // Angular velocity in world frame (already computed in cacheRootFrameVelocities)
+  odom_msg.twist.twist.angular.x = root_omega_world_.x();
+  odom_msg.twist.twist.angular.y = root_omega_world_.y();
+  odom_msg.twist.twist.angular.z = root_omega_world_.z();
+
+  // Publish the odometry message
+  root_frame_odom_pub_.publish(odom_msg);
 }
 
 void DragonCopilot::visualizeTrajectory()
