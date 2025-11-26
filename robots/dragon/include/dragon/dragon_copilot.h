@@ -40,6 +40,7 @@
 #include <aerial_robot_control/minco_trajectory/minco.hpp>
 #include <aerial_robot_control/minco_trajectory/trajectory.hpp>
 #include <visualization_msgs/MarkerArray.h>
+#include <nav_msgs/Odometry.h>
 
 namespace aerial_robot_navigation
 {
@@ -239,9 +240,12 @@ private:
   // Pre-computed for efficiency to avoid repeated extraction in constraint generation
   std::vector<Eigen::MatrixXd> link_jacobians_linear_;
 
-  // Root frame velocity and rotation (cached for constraint generation)
-  Eigen::Matrix3d R_world_to_root_;  // Rotation matrix from world to root frame
-  KDL::Vector v_root_world_;         // Root velocity in world frame
+  // Root frame velocity and rotation (cached for constraint generation and publishing)
+  Eigen::Matrix3d R_world_to_root_;   // Rotation matrix from world to root frame
+  KDL::Vector root_vel_body_;         // Root velocity in body frame [m/s]
+  KDL::Vector root_vel_world_;        // Root velocity in world frame [m/s]
+  KDL::Vector root_omega_body_;       // Root angular velocity in body frame [rad/s]
+  KDL::Vector root_omega_world_;      // Root angular velocity in world frame [rad/s]
 
   /* ===== MINCO Trajectory ===== */
   minco::MINCO_S3NU minco_;           // MINCO trajectory generator for minimum jerk (s=3)
@@ -253,10 +257,11 @@ private:
                                                            // frame
 
   /* ===== ROS Communication ===== */
-  ros::Publisher trajectory_viz_pub_;  // Publisher for trajectory visualization (path and markers)
+  ros::Publisher trajectory_viz_pub_;    // Publisher for trajectory visualization (path and markers)
+  ros::Publisher root_frame_odom_pub_;   // Publisher for root frame odometry (position and velocity in world frame)
 
   /**
-   * @brief Update all cached transformations and Jacobians for current control cycle
+   * @brief Cache all transformations and Jacobians for current control cycle
    *
    * This method should be called once at the beginning of each control cycle
    * to update all transformation frames and Jacobians. This avoids redundant calculations
@@ -270,7 +275,50 @@ private:
    * The Jacobians computed are with respect to the root frame and map joint velocities
    * to link frame velocities (both linear and angular).
    */
-  void updateTransformationCache();
+  void cacheTransformations();
+
+  /**
+   * @brief Cache frame transformations and link frames
+   *
+   * Updates joint_positions_, world_to_cog_, world_to_baselink_, root_to_baselink_,
+   * baselink_to_root_, and world_to_root_.
+   * Also computes forward kinematics for all links and stores their frames in link_frames_.
+   */
+  void cacheFrameTransforms();
+
+  /**
+   * @brief Compute and cache Jacobians for link3 to linkN heads
+   *
+   * Computes Jacobians for link3 onwards (used for velocity constraints on link2 to linkN-1 tails).
+   * Requires link_frames_ to be populated first by cacheLinkFrames().
+   */
+  void cacheJacobians();
+
+  /**
+   * @brief Compute and cache Jacobian for the last link's tail position
+   *
+   * The tail Jacobian is computed from the head Jacobian plus the rotational
+   * contribution from the offset vector (head to tail).
+   */
+  void cacheLastLinkTailJacobian();
+
+  /**
+   * @brief Cache root frame velocities from command input
+   *
+   * This method computes and caches the root frame velocities (both linear and angular)
+   * in both body frame and world frame. Should be called once per control cycle after
+   * updateTransformationCache() to avoid redundant calculations across multiple functions.
+   *
+   * Updates:
+   * - root_vel_body_: Linear velocity command in root body frame
+   * - root_vel_world_: Linear velocity transformed to world frame
+   * - root_omega_body_: Angular velocity command in root body frame
+   * - root_omega_world_: Angular velocity transformed to world frame
+   * - R_world_to_root_: Rotation matrix cached for other computations
+   *
+   * @param root_cmd Root frame command structure containing velocity commands
+   */
+  void cacheRootFrameVelocities(const RootFrameCommand& root_cmd);
 
   /**
    * @brief Compute and set CoG velocity targets from root frame commands
@@ -367,5 +415,14 @@ private:
    * @param dq Joint velocity increments
    */
   void publishJointCommands(const Eigen::VectorXd& dq);
+
+  /**
+   * @brief Publish root frame odometry (position and velocity in world frame)
+   *
+   * This method publishes the root frame's position and velocity in world coordinates
+   * as a nav_msgs/Odometry message. The position is obtained from the cached world_to_root_
+   * transformation. The velocity uses the cached root_vel_world_ and root_omega_world_.
+   */
+  void publishRootFrameOdom();
 };
 };  // namespace aerial_robot_navigation
