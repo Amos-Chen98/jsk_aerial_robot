@@ -48,13 +48,13 @@ namespace aerial_robot_navigation
  */
 struct RootFrameCommand
 {
-  double x_vel;    // Forward(+)/backward(-) velocity in root frame body coordinates [m/s]
-  double y_vel;    // Left(+)/right(-) velocity in root frame body coordinates [m/s]
-  double z_vel;    // Up(+)/down(-) velocity in world frame [m/s]
-  double yaw_vel;  // Yaw angular velocity (counter-clockwise: +) [rad/s]
-  double pitch;    // Pitch attitude (nose up: +, nose down: -) [rad]
+  double x_vel;      // Forward(+)/backward(-) velocity in root frame body coordinates [m/s]
+  double y_vel;      // Left(+)/right(-) velocity in root frame body coordinates [m/s]
+  double z_vel;      // Up(+)/down(-) velocity in world frame [m/s]
+  double yaw_vel;    // Yaw angular velocity (counter-clockwise: +) [rad/s]
+  double pitch_vel;  // Pitch angular velocity (nose up: +, nose down: -) [rad/s]
 
-  RootFrameCommand() : x_vel(0.0), y_vel(0.0), z_vel(0.0), yaw_vel(0.0), pitch(0.0)
+  RootFrameCommand() : x_vel(0.0), y_vel(0.0), z_vel(0.0), yaw_vel(0.0), pitch_vel(0.0)
   {
   }
 };
@@ -193,12 +193,12 @@ private:
   void visualizeTrajectory();
 
   /* ===== Copilot Control Parameters ===== */
-  double max_copilot_x_vel_;        // maximum forward/backward velocity
-  double max_copilot_y_vel_;        // maximum lateral velocity
-  double max_copilot_z_vel_;        // maximum vertical velocity
-  double max_copilot_yaw_vel_;      // maximum yaw angular velocity
-  double max_copilot_pitch_angle_;  // maximum pitch angle for attitude control
-  double trigger_deadzone_;         // deadzone for L2/R2 triggers
+  double max_copilot_x_vel_;       // maximum forward/backward velocity
+  double max_copilot_y_vel_;       // maximum lateral velocity
+  double max_copilot_z_vel_;       // maximum vertical velocity
+  double max_copilot_yaw_vel_;     // maximum yaw angular velocity
+  double max_copilot_pitch_vel_;   // maximum pitch angular velocity for attitude control
+  double trigger_deadzone_;        // deadzone for L2/R2 triggers
 
   /* Joystick state tracking */
   bool r2_trigger_initialized_;  // true after R2 has been pressed at least once
@@ -286,17 +286,18 @@ private:
   void setCoGVelocityTargets(const RootFrameCommand& root_cmd);
 
   /**
-   * @brief Set pitch attitude target with smooth transition
+   * @brief Update baselink attitude target from pitch velocity command
    *
-   * This method computes the desired baselink orientation from the commanded root frame pitch,
-   * applies smooth transition limits to avoid abrupt attitude changes, and updates the final
-   * target baselink rotation for the control system.
+   * This method integrates the pitch velocity command to update the target pitch angle,
+   * computes the desired baselink orientation (roll and pitch) from the accumulated pitch,
+   * applies smooth transition limits to avoid abrupt attitude changes, and updates the
+   * final target baselink rotation for the control system.
    *
    * The transformation follows: {}^{world}R_{baselink} = {}^{world}R_{root} * {}^{root}R_{baselink}
    *
-   * @param root_cmd Root frame command structure containing pitch attitude command
+   * @param root_cmd Root frame command structure containing pitch velocity command
    */
-  void setPitchAttitudeTarget(const RootFrameCommand& root_cmd);
+  void setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd);
 
   /**
    * @brief Generate joint commands from link velocity directions
