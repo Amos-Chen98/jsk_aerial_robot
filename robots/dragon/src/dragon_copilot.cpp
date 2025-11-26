@@ -115,7 +115,7 @@ void DragonCopilot::rosParamInit()
   getParam<double>(navi_nh, "max_y_vel", max_copilot_y_vel_, 1.0);
   getParam<double>(navi_nh, "max_z_vel", max_copilot_z_vel_, 0.5);
   getParam<double>(navi_nh, "max_yaw_vel", max_copilot_yaw_vel_, 0.5);
-  getParam<double>(navi_nh, "max_pitch_angle", max_copilot_pitch_angle_, 0.5);  // ~30 degrees
+  getParam<double>(navi_nh, "max_pitch_vel", max_copilot_pitch_vel_, 0.5);  // rad/s
   getParam<double>(navi_nh, "trigger_deadzone", trigger_deadzone_, 0.1);
   getParam<bool>(navi_nh, "hold_attitude_on_idle", hold_attitude_on_idle_, true);
 
@@ -124,7 +124,7 @@ void DragonCopilot::rosParamInit()
   ROS_INFO("[DragonCopilot] - Max Y velocity: %.2f m/s", max_copilot_y_vel_);
   ROS_INFO("[DragonCopilot] - Max Z velocity: %.2f m/s", max_copilot_z_vel_);
   ROS_INFO("[DragonCopilot] - Max Yaw velocity: %.2f rad/s", max_copilot_yaw_vel_);
-  ROS_INFO("[DragonCopilot] - Max Pitch angle: %.2f rad", max_copilot_pitch_angle_);
+  ROS_INFO("[DragonCopilot] - Max Pitch velocity: %.2f rad/s", max_copilot_pitch_vel_);
   ROS_INFO("[DragonCopilot] - Hold attitude on idle: %s", hold_attitude_on_idle_ ? "true" : "false");
 }
 
@@ -308,29 +308,21 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   }
 
   // ---------- pitch control via JOY_AXIS_STICK_LEFT ----------
-  // Left stick vertical: pitch attitude
+  // Left stick vertical: pitch angular velocity
   double raw_pitch_cmd = joy_cmd.axes[JOY_AXIS_STICK_LEFT_UPWARDS];
 
-  /* Process Pitch attitude control */
-  bool has_pitch_input = false;
-
+  /* Process Pitch velocity control */
   if (fabs(raw_pitch_cmd) > joy_stick_deadzone_)
   {
-    root_cmd.pitch = raw_pitch_cmd * max_copilot_pitch_angle_;
-    has_pitch_input = true;
+    // Active input: apply pitch velocity
+    root_cmd.pitch_vel = raw_pitch_cmd * max_copilot_pitch_vel_;
   }
   else if (hold_attitude_on_idle_)
   {
-    // When no input and attitude hold is enabled, use last commanded pitch
-    root_cmd.pitch = last_commanded_pitch_;
+    // When no input and attitude hold is enabled, set pitch_vel to 0 (hold current attitude)
+    root_cmd.pitch_vel = 0.0;
   }
-  // else: root_cmd.pitch remains 0.0 (level flight) from constructor
-
-  // Update last commanded pitch if there was input
-  if (has_pitch_input)
-  {
-    last_commanded_pitch_ = root_cmd.pitch;
-  }
+  // else: root_cmd.pitch_vel remains 0.0 from constructor (will return to level flight)
 
   // ---------- yaw control via JOY_AXIS_STICK_LEFT ----------
   // Left stick horizontal: yaw rotation
@@ -345,7 +337,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   // Finally, revert x and y axis, so that the forward on joystick means forward along the head direction
   root_cmd.x_vel = -root_cmd.x_vel;
   root_cmd.y_vel = -root_cmd.y_vel;
-  root_cmd.pitch = -root_cmd.pitch;
+  root_cmd.pitch_vel = -root_cmd.pitch_vel;
 
   return root_cmd;
 }
@@ -363,11 +355,11 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& root_c
   // ===== Step 2: Compute and set CoG velocity targets =====
   setCoGVelocityTargets(root_cmd);
 
-  // ===== Step 3: Set pitch attitude target =====
-  setPitchAttitudeTarget(root_cmd);
+  // ===== Step 3: Update baselink attitude target from pitch velocity command =====
+  setBaselinkAttitudeTarget(root_cmd);
 
   // ===== Step 4: Plan the movement of following links and publish joint control commands =====
-  copilotPlan(root_cmd);
+  //   copilotPlan(root_cmd);
 }
 
 void DragonCopilot::updateTransformationCache()
@@ -566,15 +558,28 @@ void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
   setTargetOmegaZ(des_root_omega_world.z());
 }
 
-void DragonCopilot::setPitchAttitudeTarget(const RootFrameCommand& root_cmd)
+void DragonCopilot::setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd)
 {
   // Get current root yaw in world frame
   double root_r, root_p, root_y;
   world_to_root_.M.GetRPY(root_r, root_p, root_y);
 
+  // Update last_commanded_pitch_ based on pitch velocity
+  // Integrate pitch velocity to get target pitch angle
+  // Using a simple Euler integration: pitch = pitch + pitch_vel * dt
+  // Here we use baselink_rot_change_thresh_ as a proxy for dt-like scaling
+  last_commanded_pitch_ += root_cmd.pitch_vel * baselink_rot_change_thresh_;
+
+  // Clamp the pitch angle to reasonable limits (e.g., +/- 60 degrees)
+  const double max_pitch_angle = 1.05;  // ~60 degrees
+  if (last_commanded_pitch_ > max_pitch_angle)
+    last_commanded_pitch_ = max_pitch_angle;
+  else if (last_commanded_pitch_ < -max_pitch_angle)
+    last_commanded_pitch_ = -max_pitch_angle;
+
   // Construct desired root orientation in world frame
   // Keep current yaw, apply commanded pitch, zero roll (level flight)
-  KDL::Rotation des_world_to_root_rotation = KDL::Rotation::RPY(0.0, root_cmd.pitch, root_y);
+  KDL::Rotation des_world_to_root_rotation = KDL::Rotation::RPY(0.0, last_commanded_pitch_, root_y);
 
   // Calculate desired baselink orientation using rotation composition:
   // {}^{world}R_{baselink} = {}^{world}R_{root} * {}^{root}R_{baselink}
