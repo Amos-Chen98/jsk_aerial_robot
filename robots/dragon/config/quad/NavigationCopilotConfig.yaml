@@ -49,6 +49,14 @@ navigation:
     # velocity_ramp_rate: 2.0            # Acceleration limit [m/s^2]
     # pitch_rate_limit: 0.3              # Pitch change rate limit [rad/s]
     
+    # ========== Snake Following Mode ==========
+    # When enabled, link2/3/4 tails follow the trajectory traced by link1
+    snake_mode_enabled: true              # Enable snake following mode
+    snake_joint_control_enabled: true    # Enable joint control (false = visualization only)
+    snake_trajectory_buffer_size: 1000    # Trajectory buffer size (number of points)
+    snake_ik_gain: 0.5                    # IK gain (recommended: 0.3-1.0)
+    snake_max_joint_delta: 0.05           # Max joint change per iteration [rad]
+    
 # Notes:
 # - R2 trigger: Forward movement (body x-axis positive)
 # - L2 trigger: Backward movement (body x-axis negative)

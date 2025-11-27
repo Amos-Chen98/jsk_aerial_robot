@@ -21,7 +21,6 @@ Panels:
   - Class: rviz/Views
     Expanded:
       - /Current View1
-      - /Current View1/Position1
     Name: Views
     Splitter Ratio: 0.5
   - Class: rviz/Time
@@ -318,6 +317,14 @@ Visualization Manager:
       Topic: /dragon/copilot/root_frame_odom
       Unreliable: false
       Value: true
+    - Class: rviz/MarkerArray
+      Enabled: true
+      Marker Topic: /dragon/copilot/snake_trajectory
+      Name: MarkerArray
+      Namespaces:
+        {}
+      Queue Size: 100
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 255; 255; 255
@@ -345,25 +352,26 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz/FrameAligned
+      Class: rviz/ThirdPersonFollower
+      Distance: 2.582068681716919
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
+      Field of View: 0.7853981852531433
+      Focal Point:
+        X: 1.0281168222427368
+        Y: 0.3148152232170105
+        Z: 0
+      Focal Shape Fixed Size: true
+      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
-      Lock Camera: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.6399998664855957
-      Point towards: arbitrary
-      Position:
-        X: 1.9304466247558594
-        Y: 0.21062961220741272
-        Z: 1.2486510276794434
-      Roll: 0
+      Pitch: 0.5601201057434082
       Target Frame: dragon/root
-      Yaw: 3.1381852626800537
+      Yaw: 0.1796676218509674
     Saved: ~
 Window Geometry:
   Displays:

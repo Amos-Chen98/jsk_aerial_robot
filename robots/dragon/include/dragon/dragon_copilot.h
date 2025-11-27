@@ -41,6 +41,8 @@
 #include <aerial_robot_control/minco_trajectory/trajectory.hpp>
 #include <visualization_msgs/MarkerArray.h>
 #include <nav_msgs/Odometry.h>
+#include <deque>
+#include <std_msgs/Empty.h>
 
 namespace aerial_robot_navigation
 {
@@ -58,6 +60,18 @@ struct RootFrameCommand
   RootFrameCommand() : x_vel(0.0), y_vel(0.0), z_vel(0.0), yaw_vel(0.0), pitch_vel(0.0)
   {
   }
+};
+
+/**
+ * @brief Structure to hold a trajectory point with position and timestamp
+ */
+struct TrajectoryPoint
+{
+  Eigen::Vector3d position;  // Position in world frame [m]
+  double timestamp;          // Time when this point was recorded [s]
+  
+  TrajectoryPoint() : position(Eigen::Vector3d::Zero()), timestamp(0.0) {}
+  TrajectoryPoint(const Eigen::Vector3d& pos, double t) : position(pos), timestamp(t) {}
 };
 
 class DragonCopilot : public DragonNavigator
@@ -201,11 +215,11 @@ private:
   double max_copilot_pitch_vel_;   // maximum pitch angular velocity for attitude control
   double trigger_deadzone_;        // deadzone for L2/R2 triggers
 
-  /* Joystick state tracking */
-  bool r2_trigger_initialized_;  // true after R2 has been pressed at least once
-  bool l2_trigger_initialized_;  // true after L2 has been pressed at least once
-  double last_commanded_pitch_;  // last pitch angle when there was joystick input
-  bool hold_attitude_on_idle_;   // flag to enable attitude hold when no input (default: true)
+  /* ===== Joystick State Tracking ===== */
+  bool r2_trigger_initialized_;   // true after R2 has been pressed at least once
+  bool l2_trigger_initialized_;   // true after L2 has been pressed at least once
+  double last_commanded_pitch_;   // last pitch angle when there was joystick input
+  bool hold_attitude_on_idle_;    // flag to enable attitude hold when no input (default: true)
 
   /* ===== Robot Model Parameters (initialized once) ===== */
   int link_num_;                                         // Number of robot links (equals rotor number)
@@ -217,65 +231,72 @@ private:
   std::vector<std::string> link_names_;                  // Pre-computed link names ("link1", "link2", ..., "linkN")
   std::unique_ptr<KDL::TreeJntToJacSolver> jac_solver_;  // KDL Jacobian solver
 
-  /* ===== Cached State (updated once per control cycle) ===== */
-  // Transformation frames
+  /* ===== Cached Transformations (updated once per control cycle) ===== */
   KDL::Frame world_to_cog_;        // CoG frame in world coordinates
   KDL::Frame world_to_baselink_;   // Baselink frame in world coordinates
   KDL::Frame world_to_root_;       // Root frame in world coordinates
   KDL::Frame root_to_baselink_;    // Transform from root (link1) to baselink (FC)
   KDL::Frame baselink_to_root_;    // Transform from baselink to root
+  Eigen::Matrix3d R_world_to_root_;  // Rotation matrix from world to root frame
+
+  /* ===== Cached Joint State ===== */
   KDL::JntArray joint_positions_;  // Current joint positions
 
-  // Link frames (orientations) in root frame
+  /* ===== Cached Link Frames (in root frame) ===== */
   // link_frames_[i] contains the frame for link{i+1} (i.e., index 0 = link1, index 1 = link2, etc.)
   std::vector<KDL::Frame> link_frames_;
 
-  // Jacobians for each link frame
+  /* ===== Cached Jacobians ===== */
   // Jacobians map joint velocities to link frame velocities: v_link = J * q_dot
   // Each Jacobian has 6 rows (linear xyz + angular xyz) and N columns (number of joints)
   // link_jacobians_[i-1] contains the Jacobian for link{i} (i.e., index 0 = link1, index 1 = link2, etc.)
   std::vector<KDL::Jacobian> link_jacobians_;
-
   // Linear parts of Jacobians (first 3 rows: x, y, z velocities)
   // Pre-computed for efficiency to avoid repeated extraction in constraint generation
   std::vector<Eigen::MatrixXd> link_jacobians_linear_;
 
-  // Root frame velocity and rotation (cached for constraint generation and publishing)
-  Eigen::Matrix3d R_world_to_root_;   // Rotation matrix from world to root frame
-  KDL::Vector root_vel_body_;         // Root velocity in body frame [m/s]
-  KDL::Vector root_vel_world_;        // Root velocity in world frame [m/s]
-  KDL::Vector root_omega_body_;       // Root angular velocity in body frame [rad/s]
-  KDL::Vector root_omega_world_;      // Root angular velocity in world frame [rad/s]
+  /* ===== Cached Root Frame Velocities ===== */
+  KDL::Vector root_vel_body_;      // Root velocity in body frame [m/s]
+  KDL::Vector root_vel_world_;     // Root velocity in world frame [m/s]
+  KDL::Vector root_omega_body_;    // Root angular velocity in body frame [rad/s]
+  KDL::Vector root_omega_world_;   // Root angular velocity in world frame [rad/s]
+
+  /* ===== Cached Eigen Conversions (from KDL types) ===== */
+  Eigen::Vector3d root_pos_world_eigen_;   // Root position in world frame (Eigen version of world_to_root_.p)
+  Eigen::Vector3d root_vel_world_eigen_;   // Root velocity in world frame (Eigen version of root_vel_world_)
 
   /* ===== MINCO Trajectory ===== */
   minco::MINCO_S3NU minco_;           // MINCO trajectory generator for minimum jerk (s=3)
   Trajectory<5> current_trajectory_;  // Current trajectory being executed
-
   // Computed trajectory velocity directions
-  std::vector<Eigen::Vector3d> link_vel_directions_;  // Velocity directions for each link (from link2) in world frame
-  std::vector<Eigen::Vector3d> link_vel_directions_root_;  // Velocity directions for each link (from link2) in root
-                                                           // frame
+  std::vector<Eigen::Vector3d> link_vel_directions_;       // Velocity directions for each link (from link2) in world frame
+  std::vector<Eigen::Vector3d> link_vel_directions_root_;  // Velocity directions for each link (from link2) in root frame
 
-  /* ===== ROS Communication ===== */
-  ros::Publisher trajectory_viz_pub_;    // Publisher for trajectory visualization (path and markers)
-  ros::Publisher root_frame_odom_pub_;   // Publisher for root frame odometry (position and velocity in world frame)
+  /* ===== Snake Following Parameters ===== */
+  bool snake_mode_enabled_;              // Flag to enable/disable snake following visualization
+  bool snake_joint_control_enabled_;     // Flag to enable/disable snake joint control publishing
+  double trajectory_sample_interval_;    // Minimum distance between trajectory samples [m]
+  double trajectory_buffer_max_length_;  // Maximum arc length to store in buffer [m]
+  double snake_ik_gain_;                 // Gain for IK position error correction
+  double snake_max_joint_delta_;         // Maximum joint angle change per iteration [rad]
 
-  /**
-   * @brief Cache all transformations and Jacobians for current control cycle
-   *
-   * This method should be called once at the beginning of each control cycle
-   * to update all transformation frames and Jacobians. This avoids redundant calculations
-   * across multiple functions.
-   *
-   * Updates:
-   * - All transformation frames (world_to_cog_, world_to_baselink_, root_to_baselink_, etc.)
-   * - Joint positions cache (joint_positions_)
-   * - Jacobians for all link heads (link_jacobians_)
-   *
-   * The Jacobians computed are with respect to the root frame and map joint velocities
-   * to link frame velocities (both linear and angular).
-   */
-  void cacheTransformations();
+  /* ===== Snake Following State ===== */
+  std::deque<TrajectoryPoint> trajectory_buffer_;  // Buffer storing recent trajectory points
+  double total_arc_length_;                        // Total arc length of trajectory in buffer [m]
+  Eigen::Vector3d last_recorded_position_;         // Last position added to buffer
+  bool trajectory_initialized_;                    // Flag indicating if buffer has been initialized
+
+  /* ===== Snake Following Cached Values (updated once per control cycle) ===== */
+  std::vector<Eigen::Vector3d> snake_target_positions_world_;   // Cached target positions for link tails in world frame
+  std::vector<Eigen::Vector3d> snake_current_positions_world_;  // Cached current positions for link tails in world frame
+
+  /* ===== ROS Publishers ===== */
+  ros::Publisher trajectory_viz_pub_;        // Publisher for MINCO trajectory visualization
+  ros::Publisher root_frame_odom_pub_;       // Publisher for root frame odometry
+  ros::Publisher snake_trajectory_viz_pub_;  // Publisher for snake trajectory visualization
+
+  /* ===== ROS Subscribers ===== */
+  ros::Subscriber reset_trajectory_sub_;  // Subscriber to reset trajectory buffer
 
   /**
    * @brief Cache frame transformations and link frames
@@ -424,5 +445,88 @@ private:
    * transformation. The velocity uses the cached root_vel_world_ and root_omega_world_.
    */
   void publishRootFrameOdom();
+
+  /* ===== Snake Following Methods ===== */
+
+  /**
+   * @brief Update the trajectory history buffer with current root position
+   *
+   * Records the current root frame position to the trajectory buffer.
+   * Maintains a fixed-length buffer based on maximum arc length needed.
+   */
+  void updateTrajectoryBuffer();
+
+  /**
+   * @brief Find a position along the trajectory at a given arc length from the head
+   *
+   * @param arc_length The arc length distance from the current head position [m]
+   * @return The interpolated position at the given arc length
+   */
+  Eigen::Vector3d findPositionAtArcLength(double arc_length);
+
+  /**
+   * @brief Find a point on trajectory that is exactly target_distance away from a given point
+   *
+   * This method searches through the trajectory buffer to find a point on the trajectory
+   * that satisfies the distance constraint. This is essential for snake-following where
+   * each link tail must be exactly link_length away from its head.
+   *
+   * @param from_point The reference point (link head position) in world frame
+   * @param target_distance The required distance from from_point to the trajectory point
+   * @return The point on trajectory at the specified distance, or closest match if not found
+   */
+  Eigen::Vector3d findPointOnTrajectoryAtDistance(const Eigen::Vector3d& from_point, double target_distance);
+
+  /**
+   * @brief Compute target positions for each link tail based on trajectory history
+   *
+   * Uses the trajectory buffer to find where each link tail should be positioned
+   * so that the robot follows the path traced by the head (like a snake).
+   * Each link tail target is constrained to be exactly link_length away from its head.
+   *
+   * @return Vector of target positions for link2_tail, link3_tail, link4_tail in root frame
+   */
+  std::vector<Eigen::Vector3d> computeSnakeTargetPositions();
+
+  /**
+   * @brief Compute joint angles to achieve target link tail positions using IK
+   *
+   * Uses iterative inverse kinematics to find joint angles that place each link tail
+   * at its target position.
+   *
+   * @param target_positions Target positions for each link tail (link2, link3, link4) in world frame
+   * @return Joint angle commands
+   */
+  Eigen::VectorXd computeSnakeJointCommands(const std::vector<Eigen::Vector3d>& target_positions);
+
+  /**
+   * @brief Execute snake-following control
+   *
+   * Main method that combines trajectory buffer update, target computation,
+   * and joint command generation for snake-like following behavior.
+   */
+  void executeSnakeFollowing();
+
+  /**
+   * @brief Visualize the trajectory buffer and target positions in RViz
+   */
+  void visualizeSnakeTrajectory();
+
+  /**
+   * @brief Callback to reset the trajectory buffer
+   */
+  void resetTrajectoryBufferCallback(const std_msgs::EmptyConstPtr& msg);
+
+  /**
+   * @brief Compute the current link tail positions in root frame
+   * @return Vector of current positions for link1_tail (=link2_head), link2_tail, link3_tail, link4_tail
+   */
+  std::vector<Eigen::Vector3d> getCurrentLinkTailPositions();
+
+  /**
+   * @brief Compute the current link tail positions in world frame
+   * @return Vector of current positions for link1_tail (=link2_head), link2_tail, link3_tail, link4_tail in world frame
+   */
+  std::vector<Eigen::Vector3d> getCurrentLinkTailPositionsWorld();
 };
 };  // namespace aerial_robot_navigation

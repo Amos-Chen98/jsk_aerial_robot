@@ -2,6 +2,8 @@
 #include <aerial_robot_control/util/joy_parser.h>
 #include <tf_conversions/tf_kdl.h>
 #include <nav_msgs/Odometry.h>
+#include <limits>
+#include <cmath>
 
 using namespace aerial_robot_model;
 using namespace aerial_robot_navigation;
@@ -14,6 +16,14 @@ DragonCopilot::DragonCopilot()
   , hold_attitude_on_idle_(true)
   , link_num_(0)       // Will be initialized from robot model
   , link_length_(0.5)  // Default value, will be updated from robot model
+  , snake_mode_enabled_(true)
+  , snake_joint_control_enabled_(false)  // Disabled by default for safety
+  , trajectory_sample_interval_(0.01)    // 1cm minimum distance between samples
+  , trajectory_buffer_max_length_(3.0)   // Store up to 3m of trajectory
+  , snake_ik_gain_(1.0)                  // IK gain
+  , snake_max_joint_delta_(0.1)          // Max 0.1 rad per iteration
+  , total_arc_length_(0.0)
+  , trajectory_initialized_(false)
 {
 }
 
@@ -107,6 +117,11 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
   /* Initialize root frame odometry publisher */
   root_frame_odom_pub_ = nh_.advertise<nav_msgs::Odometry>("copilot/root_frame_odom", 1);
 
+  /* Initialize snake following publishers and subscribers */
+  snake_trajectory_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("copilot/snake_trajectory", 1);
+  reset_trajectory_sub_ =
+      nh_.subscribe("copilot/reset_trajectory", 1, &DragonCopilot::resetTrajectoryBufferCallback, this);
+
   /* Initialize cached velocities */
   root_vel_body_ = KDL::Vector::Zero();
   root_vel_world_ = KDL::Vector::Zero();
@@ -136,6 +151,19 @@ void DragonCopilot::rosParamInit()
   ROS_INFO("[DragonCopilot] - Max Yaw velocity: %.2f rad/s", max_copilot_yaw_vel_);
   ROS_INFO("[DragonCopilot] - Max Pitch velocity: %.2f rad/s", max_copilot_pitch_vel_);
   ROS_INFO("[DragonCopilot] - Hold attitude on idle: %s", hold_attitude_on_idle_ ? "true" : "false");
+
+  /* Load snake-following parameters */
+  getParam<bool>(navi_nh, "snake_mode_enabled", snake_mode_enabled_, true);
+  getParam<bool>(navi_nh, "snake_joint_control_enabled", snake_joint_control_enabled_, false);
+  getParam<double>(navi_nh, "trajectory_sample_interval", trajectory_sample_interval_, 0.01);
+  getParam<double>(navi_nh, "trajectory_buffer_max_length", trajectory_buffer_max_length_, 3.0);
+  getParam<double>(navi_nh, "snake_ik_gain", snake_ik_gain_, 1.0);
+  getParam<double>(navi_nh, "snake_max_joint_delta", snake_max_joint_delta_, 0.1);
+
+  ROS_INFO("[DragonCopilot] Snake following mode: %s", snake_mode_enabled_ ? "enabled" : "disabled");
+  ROS_INFO("[DragonCopilot] Snake joint control: %s", snake_joint_control_enabled_ ? "enabled" : "disabled");
+  ROS_INFO("[DragonCopilot] - Trajectory sample interval: %.3f m", trajectory_sample_interval_);
+  ROS_INFO("[DragonCopilot] - Trajectory buffer max length: %.2f m", trajectory_buffer_max_length_);
 }
 
 void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
@@ -240,7 +268,7 @@ void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
   transformAndSetControlTargets(root_cmd);
 
   /* Publish root frame odometry (position and velocity in world frame) */
-  publishRootFrameOdom();
+  //   publishRootFrameOdom();
 }
 
 RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_cmd)
@@ -362,32 +390,27 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& root_c
   // - Baselink frame: the FC (flight controller) frame, what the controller uses
   // - CoG: center of gravity, what the controller actually tracks
 
-  // ===== Step 1: Cache transformations (all frames computed once) =====
-  cacheTransformations();
-
-  // ===== Step 2: Cache root frame velocities (computed once, used by multiple functions) =====
+  // ===== Step 1: Cache transformations, positions, and velocities =====
+  cacheFrameTransforms();
+  cacheJacobians();
+  cacheLastLinkTailJacobian();
   cacheRootFrameVelocities(root_cmd);
 
-  // ===== Step 3: Compute and set CoG velocity targets =====
+  // ===== Step 2: Compute and set CoG velocity targets =====
   setCoGVelocityTargets(root_cmd);
 
-  // ===== Step 4: Update baselink attitude target from pitch velocity command =====
+  // ===== Step 3: Update baselink attitude target from pitch velocity command =====
   setBaselinkAttitudeTarget(root_cmd);
 
   // ===== Step 4: Plan the movement of following links and publish joint control commands =====
+
   //   copilotPlan(root_cmd);
-}
 
-void DragonCopilot::cacheTransformations()
-{
-  // Step 1: Cache frame transformations and link frames
-  cacheFrameTransforms();
-
-  // Step 2: Compute and cache Jacobians for link heads
-  cacheJacobians();
-
-  // Step 3: Compute Jacobian for the last link's tail
-  cacheLastLinkTailJacobian();
+  /* Execute snake-following control if enabled */
+  if (snake_mode_enabled_)
+  {
+    executeSnakeFollowing();
+  }
 }
 
 void DragonCopilot::cacheFrameTransforms()
@@ -423,6 +446,9 @@ void DragonCopilot::cacheFrameTransforms()
       R_world_to_root_(i, j) = world_to_root_rotation(i, j);
     }
   }
+
+  // Cache Eigen version of root position
+  root_pos_world_eigen_ << world_to_root_.p.x(), world_to_root_.p.y(), world_to_root_.p.z();
 
   // Cache all link frames using forward kinematics
   link_frames_.clear();
@@ -573,6 +599,9 @@ void DragonCopilot::cacheRootFrameVelocities(const RootFrameCommand& root_cmd)
 
   // Add world frame z velocity component
   root_vel_world_.z(root_vel_world_.z() + root_cmd.z_vel);
+
+  // Cache Eigen version of root velocity in world frame
+  root_vel_world_eigen_ << root_vel_world_.x(), root_vel_world_.y(), root_vel_world_.z();
 
   // Cache root frame angular velocities
   // pitch_vel is around y-axis in body frame, yaw_vel is around z-axis
@@ -844,7 +873,7 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
   debugPrintVelocityInfo(dq, A, b);
 
   // Step 4: Publish joint commands
-  publishJointCommands(dq);
+  //   publishJointCommands(dq);
 }
 
 void DragonCopilot::buildConstraintMatrix(Eigen::MatrixXd& A, Eigen::VectorXd& b)
@@ -1153,6 +1182,599 @@ void DragonCopilot::visualizeTrajectory()
 
   // Publish all markers at once
   trajectory_viz_pub_.publish(marker_array);
+}
+
+/* ===== Snake Following Implementation ===== */
+
+void DragonCopilot::resetTrajectoryBufferCallback(const std_msgs::EmptyConstPtr& msg)
+{
+  trajectory_buffer_.clear();
+  total_arc_length_ = 0.0;
+  trajectory_initialized_ = false;
+  ROS_INFO("[DragonCopilot] Trajectory buffer reset");
+}
+
+void DragonCopilot::updateTrajectoryBuffer()
+{
+  // Use cached root position in world frame (already updated in cacheFrameTransforms)
+  const Eigen::Vector3d& current_position = root_pos_world_eigen_;
+  double current_time = ros::Time::now().toSec();
+
+  // Initialize if this is the first point
+  if (!trajectory_initialized_)
+  {
+    trajectory_buffer_.push_front(TrajectoryPoint(current_position, current_time));
+    last_recorded_position_ = current_position;
+    trajectory_initialized_ = true;
+    ROS_INFO("[DragonCopilot] Trajectory buffer initialized at position [%.3f, %.3f, %.3f]", current_position.x(),
+             current_position.y(), current_position.z());
+    return;
+  }
+
+  // Calculate distance from last recorded position
+  double distance = (current_position - last_recorded_position_).norm();
+
+  // Only add new point if we've moved enough
+  if (distance >= trajectory_sample_interval_)
+  {
+    // Add new point to the front of the buffer
+    trajectory_buffer_.push_front(TrajectoryPoint(current_position, current_time));
+    total_arc_length_ += distance;
+    last_recorded_position_ = current_position;
+
+    // Remove old points if buffer exceeds maximum arc length
+    while (total_arc_length_ > trajectory_buffer_max_length_ && trajectory_buffer_.size() > 2)
+    {
+      // Calculate arc length of the segment being removed
+      size_t last_idx = trajectory_buffer_.size() - 1;
+      double segment_length =
+          (trajectory_buffer_[last_idx].position - trajectory_buffer_[last_idx - 1].position).norm();
+      total_arc_length_ -= segment_length;
+      trajectory_buffer_.pop_back();
+    }
+  }
+}
+
+std::vector<Eigen::Vector3d> DragonCopilot::getCurrentLinkTailPositions()
+{
+  std::vector<Eigen::Vector3d> tail_positions;
+  tail_positions.reserve(link_num_);
+
+  // Get each link's tail position in ROOT frame (not world frame)
+  // This ensures joint changes only affect relative link positions
+  // link_i's tail = link_(i+1)'s head for i < link_num
+  // last link's tail = last link head + link_length * link_x_direction
+
+  for (int i = 0; i < link_num_; i++)
+  {
+    Eigen::Vector3d tail_pos;
+
+    if (i < link_num_ - 1)
+    {
+      // For link 1 to link(N-1), tail = next link's head
+      // link_frames_[i+1] is already in root frame coordinates
+      const KDL::Frame& next_link_frame = link_frames_[i + 1];
+      tail_pos << next_link_frame.p.x(), next_link_frame.p.y(), next_link_frame.p.z();
+    }
+    else
+    {
+      // For last link, tail = head + link_length * x_direction (in root frame)
+      const KDL::Frame& last_link_frame = link_frames_[i];
+      KDL::Vector link_x_direction = last_link_frame.M * KDL::Vector(1.0, 0.0, 0.0);
+      KDL::Vector tail_pos_kdl = last_link_frame.p + link_length_ * link_x_direction;
+      tail_pos << tail_pos_kdl.x(), tail_pos_kdl.y(), tail_pos_kdl.z();
+    }
+
+    tail_positions.push_back(tail_pos);
+  }
+
+  return tail_positions;
+}
+
+std::vector<Eigen::Vector3d> DragonCopilot::getCurrentLinkTailPositionsWorld()
+{
+  std::vector<Eigen::Vector3d> tail_positions_world;
+  tail_positions_world.reserve(link_num_);
+
+  // Get each link's tail position in WORLD frame
+  // link_i's tail = link_(i+1)'s head for i < link_num
+  // last link's tail = last link head + link_length * link_x_direction
+
+  for (int i = 0; i < link_num_; i++)
+  {
+    KDL::Vector tail_pos_root;
+
+    if (i < link_num_ - 1)
+    {
+      // For link 1 to link(N-1), tail = next link's head
+      const KDL::Frame& next_link_frame = link_frames_[i + 1];
+      tail_pos_root = next_link_frame.p;
+    }
+    else
+    {
+      // For last link, tail = head + link_length * x_direction (in root frame)
+      const KDL::Frame& last_link_frame = link_frames_[i];
+      KDL::Vector link_x_direction = last_link_frame.M * KDL::Vector(1.0, 0.0, 0.0);
+      tail_pos_root = last_link_frame.p + link_length_ * link_x_direction;
+    }
+
+    // Transform from root frame to world frame
+    KDL::Vector tail_pos_world = world_to_root_.M * tail_pos_root + world_to_root_.p;
+
+    Eigen::Vector3d tail_pos;
+    tail_pos << tail_pos_world.x(), tail_pos_world.y(), tail_pos_world.z();
+    tail_positions_world.push_back(tail_pos);
+  }
+
+  return tail_positions_world;
+}
+
+Eigen::Vector3d DragonCopilot::findPointOnTrajectoryAtDistance(const Eigen::Vector3d& from_point,
+                                                               double target_distance)
+{
+  // Find a point on the trajectory that is exactly target_distance away from from_point
+  // IMPORTANT: Search from front (newest) to back (oldest), and only consider points
+  // that are FURTHER BACK in trajectory history (i.e., older points)
+
+  if (trajectory_buffer_.size() < 2)
+  {
+    return from_point;  // Fallback
+  }
+
+  // First, find which segment the from_point is closest to (or on)
+  // This helps us determine where to start searching backward
+  size_t start_segment = 0;
+  double min_dist_to_trajectory = std::numeric_limits<double>::max();
+
+  for (size_t i = 0; i < trajectory_buffer_.size() - 1; i++)
+  {
+    const Eigen::Vector3d& p1 = trajectory_buffer_[i].position;
+    const Eigen::Vector3d& p2 = trajectory_buffer_[i + 1].position;
+
+    // Find closest point on segment to from_point
+    Eigen::Vector3d seg = p2 - p1;
+    double seg_len_sq = seg.squaredNorm();
+    double t = 0.0;
+    if (seg_len_sq > 1e-10)
+    {
+      t = std::max(0.0, std::min(1.0, (from_point - p1).dot(seg) / seg_len_sq));
+    }
+    Eigen::Vector3d closest = p1 + t * seg;
+    double dist = (from_point - closest).norm();
+
+    if (dist < min_dist_to_trajectory)
+    {
+      min_dist_to_trajectory = dist;
+      start_segment = i;
+    }
+  }
+
+  // Now search BACKWARD from start_segment (toward older points in trajectory)
+  Eigen::Vector3d best_point = trajectory_buffer_.back().position;
+  double best_distance_error = std::numeric_limits<double>::max();
+  bool found_valid_point = false;
+
+  // Walk backward through trajectory segments (from start_segment to end)
+  for (size_t i = start_segment; i < trajectory_buffer_.size() - 1; i++)
+  {
+    const Eigen::Vector3d& p1 = trajectory_buffer_[i].position;
+    const Eigen::Vector3d& p2 = trajectory_buffer_[i + 1].position;
+
+    // For segment p1-p2, find point(s) at distance target_distance from from_point
+    // Point on segment: P(t) = p1 + t * (p2 - p1), t in [0, 1]
+    // We want: |P(t) - from_point| = target_distance
+    // |p1 + t*(p2-p1) - from_point|^2 = target_distance^2
+
+    Eigen::Vector3d d = p2 - p1;          // segment direction
+    Eigen::Vector3d f = p1 - from_point;  // vector from from_point to p1
+
+    double a = d.dot(d);
+    double b = 2.0 * f.dot(d);
+    double c = f.dot(f) - target_distance * target_distance;
+
+    double discriminant = b * b - 4.0 * a * c;
+
+    if (discriminant >= 0 && a > 1e-10)
+    {
+      double sqrt_disc = std::sqrt(discriminant);
+
+      // Two possible solutions
+      double t1 = (-b - sqrt_disc) / (2.0 * a);
+      double t2 = (-b + sqrt_disc) / (2.0 * a);
+
+      // Prefer t1 if valid (usually the first intersection along the segment)
+      // Check t1 first (smaller t means closer to p1, which is closer to from_point)
+      if (t1 >= 0.0 && t1 <= 1.0)
+      {
+        Eigen::Vector3d candidate = p1 + t1 * d;
+        double dist_error = std::abs((candidate - from_point).norm() - target_distance);
+        if (dist_error < 1e-6)  // Found exact solution
+        {
+          return candidate;
+        }
+        if (dist_error < best_distance_error)
+        {
+          best_distance_error = dist_error;
+          best_point = candidate;
+          found_valid_point = true;
+        }
+      }
+
+      // Check t2 (only if t1 didn't give exact solution)
+      if (t2 >= 0.0 && t2 <= 1.0)
+      {
+        Eigen::Vector3d candidate = p1 + t2 * d;
+        double dist_error = std::abs((candidate - from_point).norm() - target_distance);
+        if (dist_error < 1e-6)  // Found exact solution
+        {
+          return candidate;
+        }
+        if (dist_error < best_distance_error)
+        {
+          best_distance_error = dist_error;
+          best_point = candidate;
+          found_valid_point = true;
+        }
+      }
+    }
+
+    // If we found a valid point with good accuracy, we can stop searching
+    // (first valid point along backward trajectory is what we want)
+    if (found_valid_point && best_distance_error < 0.01)  // 1cm tolerance
+    {
+      return best_point;
+    }
+
+    // Also check segment endpoints as candidates
+    double dist_p1 = (p1 - from_point).norm();
+    double dist_p2 = (p2 - from_point).norm();
+
+    if (std::abs(dist_p1 - target_distance) < best_distance_error)
+    {
+      best_distance_error = std::abs(dist_p1 - target_distance);
+      best_point = p1;
+    }
+    if (std::abs(dist_p2 - target_distance) < best_distance_error)
+    {
+      best_distance_error = std::abs(dist_p2 - target_distance);
+      best_point = p2;
+    }
+  }
+
+  return best_point;
+}
+
+std::vector<Eigen::Vector3d> DragonCopilot::computeSnakeTargetPositions()
+{
+  std::vector<Eigen::Vector3d> target_positions;
+  target_positions.reserve(link_num_ - 1);  // For link2_tail, link3_tail, link4_tail (N-1 tails)
+
+  if (trajectory_buffer_.size() < 2)
+  {
+    return target_positions;
+  }
+
+  // Use PREDICTED root frame state after dt to align with root_cmd timing
+  // dt is the actual control loop period from the system
+  double dt = loop_du_;
+
+  // Predicted root position in world frame: p_root_predicted = p_root_current + v_root * dt
+  // Use cached Eigen versions of root position and velocity
+  Eigen::Vector3d root_pos_predicted = root_pos_world_eigen_ + root_vel_world_eigen_ * dt;
+
+  // Predicted root orientation (for simplicity, we only apply yaw rotation)
+  // omega_z * dt gives small angle rotation around z
+  double yaw_delta = root_omega_world_.z() * dt;
+  KDL::Rotation delta_rot = KDL::Rotation::RotZ(yaw_delta);
+  KDL::Rotation predicted_root_rot = delta_rot * world_to_root_.M;
+
+  // Create predicted world_to_root transform
+  KDL::Frame world_to_root_predicted;
+  world_to_root_predicted.p = KDL::Vector(root_pos_predicted.x(), root_pos_predicted.y(), root_pos_predicted.z());
+  world_to_root_predicted.M = predicted_root_rot;
+
+  // Iteratively compute target positions for each link tail
+  // The key constraint: each link tail must be exactly link_length_ away from its head
+  // link(i) head is fixed, we find link(i) tail on trajectory at distance link_length_ from head
+
+  // Start with link2: its head = link1's tail, computed with PREDICTED root frame
+  KDL::Frame link2_head_frame_world =
+      world_to_root_predicted * link_frames_[1];  // link_frames_[1] = link2 frame in root
+  Eigen::Vector3d current_head_world(link2_head_frame_world.p.x(), link2_head_frame_world.p.y(),
+                                     link2_head_frame_world.p.z());
+
+  for (int i = 1; i < link_num_; i++)  // i = 1, 2, 3 for 4-link robot (link2, link3, link4)
+  {
+    // Find target tail position on trajectory at exactly link_length_ from current head
+    Eigen::Vector3d target_tail_world = findPointOnTrajectoryAtDistance(current_head_world, link_length_);
+
+    // Store target in WORLD frame (we'll use world frame Jacobian for IK)
+    target_positions.push_back(target_tail_world);
+
+    // For next iteration: the next link's head = current link's tail (target position)
+    current_head_world = target_tail_world;
+  }
+
+  return target_positions;
+}
+
+Eigen::VectorXd DragonCopilot::computeSnakeJointCommands(const std::vector<Eigen::Vector3d>& target_positions_world)
+{
+  // Initialize joint delta to zero
+  Eigen::VectorXd dq = Eigen::VectorXd::Zero(link_joint_num_);
+
+  if (target_positions_world.empty() || link_jacobians_linear_.empty())
+  {
+    return dq;
+  }
+
+  // Use cached current link tail positions in WORLD frame
+  const std::vector<Eigen::Vector3d>& current_positions_world = snake_current_positions_world_;
+
+  // Build constraint matrix for least-squares IK in WORLD frame
+  // Total link tail velocity in world: v_total = root_vel_world + R_world_to_root * J_root * dq = root_vel_world +
+  // J_world * dq
+  //
+  // We want: pos_current + v_total * dt = pos_target
+  // => J_world * dq = (pos_target - pos_current) / dt - root_vel_world
+  //
+  // For position control with gain: J_world * dq = gain * (pos_target - pos_current) / dt - root_vel_world
+
+  double dt = loop_du_;  // Use actual control loop period
+  // Use cached Eigen version of root velocity
+  const Eigen::Vector3d& root_vel = root_vel_world_eigen_;
+
+  int num_constraints = 3 * (link_num_ - 1);  // 3 DOF per tail (x, y, z)
+  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(num_constraints, link_joint_num_);
+  Eigen::VectorXd b = Eigen::VectorXd::Zero(num_constraints);
+
+  for (int i = 0; i < link_num_ - 1; i++)  // i = 0, 1, 2 for link2, link3, link4 tails
+  {
+    // Position error in world frame
+    // target_positions_world[i] is target for link(i+2) tail in world frame
+    // current_positions_world[i+1] is current position of link(i+2) tail in world frame
+    Eigen::Vector3d pos_error = target_positions_world[i] - current_positions_world[i + 1];
+
+    // Desired velocity to correct the error (scaled by gain) minus root motion contribution
+    // This ensures that joint motion compensates for the difference between
+    // desired link motion and root frame motion
+    Eigen::Vector3d desired_joint_vel_contribution = snake_ik_gain_ * pos_error / dt - root_vel;
+
+    // Get Jacobian for this link tail and transform to world frame
+    // link_jacobians_linear_[i] is in root frame
+    if (i < static_cast<int>(link_jacobians_linear_.size()))
+    {
+      const Eigen::MatrixXd& J_root = link_jacobians_linear_[i];
+      Eigen::MatrixXd J_world = R_world_to_root_ * J_root;  // Transform to world frame
+
+      // Fill in constraint matrix: J_world * dq = desired_joint_vel_contribution * dt
+      A.block(3 * i, 0, 3, link_joint_num_) = J_world;
+      b.segment(3 * i, 3) = desired_joint_vel_contribution * dt;
+    }
+  }
+
+  // Solve least-squares problem with damping for stability
+  double damping = 0.01;
+  Eigen::MatrixXd AtA = A.transpose() * A + damping * Eigen::MatrixXd::Identity(link_joint_num_, link_joint_num_);
+  Eigen::VectorXd Atb = A.transpose() * b;
+  dq = AtA.ldlt().solve(Atb);
+
+  //   Clamp joint deltas to maximum allowed change
+  for (int i = 0; i < link_joint_num_; i++)
+  {
+    if (dq(i) > snake_max_joint_delta_)
+      dq(i) = snake_max_joint_delta_;
+    else if (dq(i) < -snake_max_joint_delta_)
+      dq(i) = -snake_max_joint_delta_;
+  }
+
+  return dq;
+}
+
+void DragonCopilot::executeSnakeFollowing()
+{
+  // Only execute in HOVER_STATE
+  if (getNaviState() != HOVER_STATE)
+  {
+    return;
+  }
+
+  // Step 1: Update trajectory buffer with current root position
+  updateTrajectoryBuffer();
+
+  // Step 2: Check if trajectory buffer has sufficient arc length for snake following
+  // We need at least (link_num_ - 1) * link_length_ arc length to compute valid targets
+  // for all link tails (link2, link3, link4 in a 4-link robot)
+  double min_required_arc_length = (link_num_ - 1) * link_length_;
+  bool trajectory_ready = (total_arc_length_ >= min_required_arc_length);
+
+  if (!trajectory_ready)
+  {
+    ROS_INFO_THROTTLE(1.0, "[DragonCopilot] Waiting for trajectory buffer: %.2f / %.2f m (%.1f%%)", total_arc_length_,
+                      min_required_arc_length, 100.0 * total_arc_length_ / min_required_arc_length);
+    // Still visualize the trajectory being built, but don't compute or publish joint commands
+    visualizeSnakeTrajectory();
+    return;
+  }
+
+  // Step 3: Cache current link tail positions (in WORLD frame)
+  snake_current_positions_world_ = getCurrentLinkTailPositionsWorld();
+
+  // Step 4: Compute and cache target positions for each link tail (in WORLD frame)
+  // This uses predicted root frame state to align timing with root_cmd
+  snake_target_positions_world_ = computeSnakeTargetPositions();
+
+  // Debug output: print target positions (in world frame)
+  {
+    std::stringstream ss_target;
+    ss_target << "[DragonCopilot] Target positions (world frame): ";
+    for (size_t i = 0; i < snake_target_positions_world_.size(); i++)
+    {
+      ss_target << "Link" << (i + 2) << "=[" << std::fixed << std::setprecision(3)
+                << snake_target_positions_world_[i].x() << ", " << snake_target_positions_world_[i].y() << ", "
+                << snake_target_positions_world_[i].z() << "] ";
+    }
+    ROS_INFO_THROTTLE(1.0, "%s", ss_target.str().c_str());
+  }
+
+  // Step 5: Compute joint commands using IK (in world frame, considering root motion)
+  // Uses cached snake_target_positions_world_ and snake_current_positions_world_
+  Eigen::VectorXd dq = computeSnakeJointCommands(snake_target_positions_world_);
+
+  // Debug output: print joint commands
+  std::stringstream ss;
+  ss << "[DragonCopilot] dq = [";
+  for (int i = 0; i < link_joint_num_; i++)
+  {
+    ss << dq(i);
+    if (i < link_joint_num_ - 1)
+      ss << ", ";
+  }
+  ss << "]";
+  ROS_INFO_THROTTLE(1.0, "%s", ss.str().c_str());
+
+  // Step 6: Publish joint commands (only if snake_joint_control_enabled_ is true)
+  if (snake_joint_control_enabled_)
+  {
+    publishJointCommands(dq);
+  }
+
+  // Step 7: Visualize (uses cached snake_target_positions_world_ and snake_current_positions_world_)
+  visualizeSnakeTrajectory();
+}
+
+void DragonCopilot::visualizeSnakeTrajectory()
+{
+  visualization_msgs::MarkerArray marker_array;
+  ros::Time current_time = ros::Time::now();
+
+  // Marker 1: Trajectory line (path traced by root) - already in world frame
+  visualization_msgs::Marker trajectory_line;
+  trajectory_line.header.frame_id = "world";
+  trajectory_line.header.stamp = current_time;
+  trajectory_line.ns = "snake_trajectory";
+  trajectory_line.id = 0;
+  trajectory_line.type = visualization_msgs::Marker::LINE_STRIP;
+  trajectory_line.action = visualization_msgs::Marker::ADD;
+  trajectory_line.pose.orientation.w = 1.0;
+  trajectory_line.scale.x = 0.02;  // Line width
+  trajectory_line.color.r = 1.0;
+  trajectory_line.color.g = 0.5;
+  trajectory_line.color.b = 0.0;  // Orange color
+  trajectory_line.color.a = 0.8;
+
+  for (const auto& point : trajectory_buffer_)
+  {
+    geometry_msgs::Point p;
+    p.x = point.position.x();
+    p.y = point.position.y();
+    p.z = point.position.z();
+    trajectory_line.points.push_back(p);
+  }
+  marker_array.markers.push_back(trajectory_line);
+
+  // Marker 2: Link1 tail position (cyan sphere) - use cached current positions
+  if (!snake_current_positions_world_.empty())
+  {
+    visualization_msgs::Marker link1_tail_sphere;
+    link1_tail_sphere.header.frame_id = "world";
+    link1_tail_sphere.header.stamp = current_time;
+    link1_tail_sphere.ns = "link1_tail";
+    link1_tail_sphere.id = 0;
+    link1_tail_sphere.type = visualization_msgs::Marker::SPHERE;
+    link1_tail_sphere.action = visualization_msgs::Marker::ADD;
+    link1_tail_sphere.pose.position.x = snake_current_positions_world_[0].x();  // link1 tail
+    link1_tail_sphere.pose.position.y = snake_current_positions_world_[0].y();
+    link1_tail_sphere.pose.position.z = snake_current_positions_world_[0].z();
+    link1_tail_sphere.pose.orientation.w = 1.0;
+    link1_tail_sphere.scale.x = 0.06;
+    link1_tail_sphere.scale.y = 0.06;
+    link1_tail_sphere.scale.z = 0.06;
+    link1_tail_sphere.color.r = 0.0;
+    link1_tail_sphere.color.g = 1.0;
+    link1_tail_sphere.color.b = 1.0;  // Cyan
+    link1_tail_sphere.color.a = 0.8;
+    marker_array.markers.push_back(link1_tail_sphere);
+  }
+
+  // Marker 3: Target positions for link tails (spheres) - use cached target positions
+  for (size_t i = 0; i < snake_target_positions_world_.size(); i++)
+  {
+    visualization_msgs::Marker target_sphere;
+    target_sphere.header.frame_id = "world";
+    target_sphere.header.stamp = current_time;
+    target_sphere.ns = "snake_targets";
+    target_sphere.id = i + 1;
+    target_sphere.type = visualization_msgs::Marker::SPHERE;
+    target_sphere.action = visualization_msgs::Marker::ADD;
+    target_sphere.pose.position.x = snake_target_positions_world_[i].x();
+    target_sphere.pose.position.y = snake_target_positions_world_[i].y();
+    target_sphere.pose.position.z = snake_target_positions_world_[i].z();
+    target_sphere.pose.orientation.w = 1.0;
+    target_sphere.scale.x = 0.05;
+    target_sphere.scale.y = 0.05;
+    target_sphere.scale.z = 0.05;
+    target_sphere.color.r = 0.0;
+    target_sphere.color.g = 1.0;
+    target_sphere.color.b = 0.0;  // Green
+    target_sphere.color.a = 0.8;
+    marker_array.markers.push_back(target_sphere);
+  }
+
+  // Marker 4: Current link tail positions (spheres for comparison) - use cached current positions
+  for (size_t i = 1; i < snake_current_positions_world_.size(); i++)  // Skip link1 tail (already shown as cyan)
+  {
+    visualization_msgs::Marker current_sphere;
+    current_sphere.header.frame_id = "world";
+    current_sphere.header.stamp = current_time;
+    current_sphere.ns = "snake_current";
+    current_sphere.id = i + 10;
+    current_sphere.type = visualization_msgs::Marker::SPHERE;
+    current_sphere.action = visualization_msgs::Marker::ADD;
+    current_sphere.pose.position.x = snake_current_positions_world_[i].x();
+    current_sphere.pose.position.y = snake_current_positions_world_[i].y();
+    current_sphere.pose.position.z = snake_current_positions_world_[i].z();
+    current_sphere.pose.orientation.w = 1.0;
+    current_sphere.scale.x = 0.04;
+    current_sphere.scale.y = 0.04;
+    current_sphere.scale.z = 0.04;
+    current_sphere.color.r = 1.0;
+    current_sphere.color.g = 0.0;
+    current_sphere.color.b = 0.0;  // Red
+    current_sphere.color.a = 0.8;
+    marker_array.markers.push_back(current_sphere);
+  }
+
+  // Marker 5: Arc length markers along trajectory (for debugging) - already in world frame
+  //   for (int i = 1; i <= link_num_; i++)
+  //   {
+  //     double arc_length = i * link_length_;
+  //     if (arc_length <= total_arc_length_)
+  //     {
+  //       Eigen::Vector3d pos = findPositionAtArcLength(arc_length);
+  //       visualization_msgs::Marker arc_marker;
+  //       arc_marker.header.frame_id = "world";
+  //       arc_marker.header.stamp = current_time;
+  //       arc_marker.ns = "arc_length_markers";
+  //       arc_marker.id = i + 20;
+  //       arc_marker.type = visualization_msgs::Marker::CUBE;
+  //       arc_marker.action = visualization_msgs::Marker::ADD;
+  //       arc_marker.pose.position.x = pos.x();
+  //       arc_marker.pose.position.y = pos.y();
+  //       arc_marker.pose.position.z = pos.z();
+  //       arc_marker.pose.orientation.w = 1.0;
+  //       arc_marker.scale.x = 0.03;
+  //       arc_marker.scale.y = 0.03;
+  //       arc_marker.scale.z = 0.03;
+  //       arc_marker.color.r = 0.5;
+  //       arc_marker.color.g = 0.5;
+  //       arc_marker.color.b = 1.0;  // Light blue
+  //       arc_marker.color.a = 0.8;
+  //       marker_array.markers.push_back(arc_marker);
+  //     }
+  //   }
+
+  snake_trajectory_viz_pub_.publish(marker_array);
 }
 
 /* plugin registration */
