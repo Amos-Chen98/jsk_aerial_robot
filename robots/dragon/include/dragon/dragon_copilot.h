@@ -218,7 +218,8 @@ private:
   /* ===== Joystick State Tracking ===== */
   bool r2_trigger_initialized_;   // true after R2 has been pressed at least once
   bool l2_trigger_initialized_;   // true after L2 has been pressed at least once
-  double last_commanded_pitch_;   // last pitch angle when there was joystick input
+  double root_pitch_cmd_;   // commanded root pitch angle
+  double root_yaw_cmd_;     // commanded root yaw angle
   bool hold_attitude_on_idle_;    // flag to enable attitude hold when no input (default: true)
 
   /* ===== Robot Model Parameters (initialized once) ===== */

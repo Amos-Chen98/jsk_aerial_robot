@@ -8,7 +8,8 @@
   <!--  model type 4: end -->
 
   <!-- general attribute -->
-  <baselink name="fc" />
+  <!-- baselink is set to link1 (head link), while fc (flight controller) remains on link2 -->
+  <baselink name="link1" />
   <thrust_link name="thrust" />
 
   <!-- kinematics [m] -->
