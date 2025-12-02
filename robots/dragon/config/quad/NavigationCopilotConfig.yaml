@@ -33,9 +33,9 @@ navigation:
     max_y_vel: 1.0        # Maximum lateral (left/right) velocity [m/s]
     max_z_vel: 0.5        # Maximum vertical (up/down) velocity [m/s]
     
-    # Maximum angular velocities and angles
+    # Maximum angular velocities
     max_yaw_vel: 0.5      # Maximum yaw rotation rate [rad/s] (~28.6 deg/s)
-    max_pitch_angle: 0.87 # Maximum pitch attitude angle [rad] (~50 degrees)
+    max_pitch_vel: 0.5    # Maximum pitch angular velocity [rad/s] (~28.6 deg/s)
     
     # Deadzone settings
     trigger_deadzone: 0.1 # Deadzone for L2/R2 triggers (normalized 0-1)
@@ -44,17 +44,13 @@ navigation:
     hold_attitude_on_idle: true  # When true, maintains pitch attitude when stick is released
                                  # When false, returns to level flight (pitch=0) when idle
     
-    # Advanced settings (optional, uncomment if needed)
-    # enable_velocity_ramping: true      # Smooth velocity changes
-    # velocity_ramp_rate: 2.0            # Acceleration limit [m/s^2]
-    # pitch_rate_limit: 0.3              # Pitch change rate limit [rad/s]
-    
     # ========== Snake Following Mode ==========
     # When enabled, link2/3/4 tails follow the trajectory traced by link1
     snake_mode_enabled: true              # Enable snake following mode
-    snake_joint_control_enabled: true    # Enable joint control (false = visualization only)
-    snake_trajectory_buffer_size: 1000    # Trajectory buffer size (number of points)
-    snake_ik_gain: 0.5                    # IK gain (recommended: 0.3-1.0)
+    snake_joint_control_enabled: false    # Enable joint control (false = visualization only)
+    trajectory_sample_interval: 0.01      # Trajectory sample interval [m]
+    trajectory_buffer_max_length: 3.0     # Trajectory buffer max length [m]
+    snake_ik_gain: 1.0                    # IK gain (recommended: 0.3-1.0)
     snake_max_joint_delta: 0.05           # Max joint change per iteration [rad]
     
 # Notes:

@@ -12,7 +12,8 @@ DragonCopilot::DragonCopilot()
   : DragonNavigator()
   , r2_trigger_initialized_(false)
   , l2_trigger_initialized_(false)
-  , last_commanded_pitch_(0.0)
+  , root_pitch_cmd_(0.0)
+  , root_yaw_cmd_(0.0)
   , hold_attitude_on_idle_(true)
   , link_num_(0)       // Will be initialized from robot model
   , link_length_(0.5)  // Default value, will be updated from robot model
@@ -418,6 +419,9 @@ void DragonCopilot::cacheFrameTransforms()
   // Get current joint positions
   joint_positions_ = robot_model_->getJointPositions();
 
+  // Update robot model with current joint positions to ensure seg_tf_map_ is fresh
+  robot_model_->updateRobotModel(joint_positions_);
+
   // Get CoG frame in world coordinates
   tf::poseTFToKDL(tf::Pose(tf::Transform(estimator_->getOrientation(Frame::COG, estimate_mode_),
                                          estimator_->getPos(Frame::COG, estimate_mode_))),
@@ -428,8 +432,11 @@ void DragonCopilot::cacheFrameTransforms()
                                          estimator_->getPos(Frame::BASELINK, estimate_mode_))),
                   world_to_baselink_);
 
-  // Get root to baselink transform from forward kinematics
-  root_to_baselink_ = robot_model_->forwardKinematics<KDL::Frame>("fc", joint_positions_);
+  const auto& seg_tf_map = robot_model_->getSegmentsTf();
+
+  // Get root to baselink transform from pre-computed segments tf
+  // Use getBaselinkName() to dynamically get the baselink frame name from URDF configuration
+  root_to_baselink_ = seg_tf_map.at(robot_model_->getBaselinkName());
 
   // Calculate inverse transform
   baselink_to_root_ = root_to_baselink_.Inverse();
@@ -450,26 +457,23 @@ void DragonCopilot::cacheFrameTransforms()
   // Cache Eigen version of root position
   root_pos_world_eigen_ << world_to_root_.p.x(), world_to_root_.p.y(), world_to_root_.p.z();
 
-  // Cache all link frames using forward kinematics
+  // Cache all link frames using pre-computed segments tf
   link_frames_.clear();
   link_frames_.reserve(link_num_);
 
   for (int i = 0; i < link_num_; i++)
   {
     const std::string& link_name = link_names_[i];
-
-    // Get link frame in root frame coordinates
-    KDL::Frame link_frame = robot_model_->forwardKinematics<KDL::Frame>(link_name, joint_positions_);
-    link_frames_.push_back(link_frame);
+    link_frames_.push_back(seg_tf_map.at(link_name));
   }
 }
 
 void DragonCopilot::cacheJacobians()
 {
   link_jacobians_.clear();
-  link_jacobians_.reserve(link_num_ - 1);  // link3 to linkN heads + linkN tail
+  link_jacobians_.reserve(link_num_);  // link1 to linkN heads
   link_jacobians_linear_.clear();
-  link_jacobians_linear_.reserve(link_num_ - 1);
+  link_jacobians_linear_.reserve(link_num_);
 
   // Check if Jacobian solver is initialized
   if (!jac_solver_ || link_joint_indices_.empty())
@@ -478,7 +482,9 @@ void DragonCopilot::cacheJacobians()
     return;
   }
 
-  // Compute Jacobians for all links, but only store from link3 onwards
+  // Compute and store Jacobians for all link heads (link1 to linkN)
+  // link_jacobians_[i] corresponds to link(i+1)'s head Jacobian
+  // Note: link(i+1)'s head = link(i)'s tail for i >= 1
   for (int i = 0; i < link_num_; i++)
   {
     const std::string& link_name = link_names_[i];
@@ -507,20 +513,19 @@ void DragonCopilot::cacheJacobians()
       }
     }
 
-    // Only store Jacobians from link3 onwards (for link2_tail to link(N-1)_tail)
-    if (i >= 2)  // i=2 corresponds to link3 (index starts from 0)
-    {
-      link_jacobians_.push_back(reduced_jacobian);
+    // Store Jacobian for all links
+    link_jacobians_.push_back(reduced_jacobian);
 
-      // Extract and cache the linear part (first 3 rows) for efficiency
-      Eigen::MatrixXd linear_jacobian = reduced_jacobian.data.block(0, 0, 3, link_joint_num_);
-      link_jacobians_linear_.push_back(linear_jacobian);
-    }
+    // Extract and cache the linear part (first 3 rows) for efficiency
+    Eigen::MatrixXd linear_jacobian = reduced_jacobian.data.block(0, 0, 3, link_joint_num_);
+    link_jacobians_linear_.push_back(linear_jacobian);
   }
 }
 
 void DragonCopilot::cacheLastLinkTailJacobian()
 {
+  // Compute and append linkN tail Jacobian to the end of link_jacobians_ and link_jacobians_linear_
+  // After this: link_jacobians_linear_[link_num_] = linkN tail Jacobian
   // linkN tail position = linkN head position + link_length * linkN x-axis direction
   const std::string& last_link_name = link_names_[link_num_ - 1];
   KDL::Frame last_link_frame = link_frames_[link_num_ - 1];
@@ -641,22 +646,13 @@ void DragonCopilot::setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd)
   double root_r, root_p, root_y;
   world_to_root_.M.GetRPY(root_r, root_p, root_y);
 
-  // Update last_commanded_pitch_ based on pitch velocity
-  // Integrate pitch velocity to get target pitch angle
-  // Using a simple Euler integration: pitch = pitch + pitch_vel * dt
-  // Here we use baselink_rot_change_thresh_ as a proxy for dt-like scaling
-  last_commanded_pitch_ += root_cmd.pitch_vel * baselink_rot_change_thresh_;
+  root_pitch_cmd_ = root_p + root_cmd.pitch_vel * loop_du_;
+  root_yaw_cmd_ = root_y + root_cmd.yaw_vel * loop_du_;
 
-  // Clamp the pitch angle to reasonable limits (e.g., +/- 60 degrees)
   const double max_pitch_angle = 1.05;  // ~60 degrees
-  if (last_commanded_pitch_ > max_pitch_angle)
-    last_commanded_pitch_ = max_pitch_angle;
-  else if (last_commanded_pitch_ < -max_pitch_angle)
-    last_commanded_pitch_ = -max_pitch_angle;
+  root_pitch_cmd_ = std::max(-max_pitch_angle, std::min(max_pitch_angle, root_pitch_cmd_));
 
-  // Construct desired root orientation in world frame
-  // Keep current yaw, apply commanded pitch, zero roll (level flight)
-  KDL::Rotation des_world_to_root_rotation = KDL::Rotation::RPY(0.0, last_commanded_pitch_, root_y);
+  KDL::Rotation des_world_to_root_rotation = KDL::Rotation::RPY(0.0, root_pitch_cmd_, root_yaw_cmd_);
 
   // Calculate desired baselink orientation using rotation composition:
   // {}^{world}R_{baselink} = {}^{world}R_{root} * {}^{root}R_{baselink}
@@ -873,7 +869,7 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
   debugPrintVelocityInfo(dq, A, b);
 
   // Step 4: Publish joint commands
-  //   publishJointCommands(dq);
+  publishJointCommands(dq);
 }
 
 void DragonCopilot::buildConstraintMatrix(Eigen::MatrixXd& A, Eigen::VectorXd& b)
@@ -891,10 +887,11 @@ void DragonCopilot::buildConstraintMatrix(Eigen::MatrixXd& A, Eigen::VectorXd& b
   int constraint_idx = 0;
 
   // DEBUG: Output all Jacobians in root frame
+  // link_jacobians_linear_[i] = link(i+1) head Jacobian, link_jacobians_linear_[link_num_] = linkN tail Jacobian
   std::cout << "[DragonCopilot] All Jacobians in root frame:" << std::endl;
   for (size_t k = 0; k < link_jacobians_linear_.size(); k++)
   {
-    std::cout << "  Jacobian[" << k << "] (link" << (k + 3) << " head";
+    std::cout << "  Jacobian[" << k << "] (link" << (k + 1) << " head";
     if (k == link_jacobians_linear_.size() - 1)
       std::cout << " / link" << link_num_ << " tail";
     std::cout << "):" << std::endl;
@@ -911,11 +908,12 @@ void DragonCopilot::buildConstraintMatrix(Eigen::MatrixXd& A, Eigen::VectorXd& b
     KDL::Vector des_vel(des_vel_eigen(0), des_vel_eigen(1), des_vel_eigen(2));
 
     // Transform Jacobian from root frame to world frame: Jac_world = R * Jac_root
-    // Use link(k+2)'s tail Jacobian:
-    // k=0: link2_tail = link3_head, use link_jacobians_linear_[0] (link3 head)
-    // k=1: link3_tail = link4_head, use link_jacobians_linear_[1] (link4 head)
-    // k=N-2: linkN_tail, use link_jacobians_linear_[N-2] (linkN tail)
-    const Eigen::MatrixXd& Jac_root = link_jacobians_linear_[k];
+    // Use link(k+2)'s tail Jacobian (= link(k+3)'s head for k < N-2, or linkN tail for k = N-2):
+    // k=0: link2_tail = link3_head, use link_jacobians_linear_[2] (link3 head)
+    // k=1: link3_tail = link4_head, use link_jacobians_linear_[3] (link4 head)
+    // k=N-2: linkN_tail, use link_jacobians_linear_[link_num_] (linkN tail)
+    int jac_idx = (k < link_num_ - 2) ? (k + 2) : link_num_;
+    const Eigen::MatrixXd& Jac_root = link_jacobians_linear_[jac_idx];
     Eigen::MatrixXd Jac_world = R_world_to_root_ * Jac_root;
 
     KDL::Vector v_root_cross_d = root_vel_world_ * des_vel;  // root_vel_world_ × des_vel
@@ -1000,10 +998,12 @@ void DragonCopilot::debugPrintVelocityInfo(const Eigen::VectorXd& dq, const Eige
   for (int i = 1; i < link_num_; i++)  // i = 1, 2, ..., N-1 (link2, link3, ..., linkN)
   {
     // Compute tail velocity: v_tail = v_root + J * dq
-    // link2_tail (i=1) uses link_jacobians_linear_[0] (link3 head)
-    // link3_tail (i=2) uses link_jacobians_linear_[1] (link4 head)
-    // linkN_tail (i=N-1) uses link_jacobians_linear_[N-2] (linkN tail)
-    Eigen::Vector3d tail_vel_root = link_jacobians_linear_[i - 1] * dq;
+    // link(i+1)_tail = link(i+2)_head for i < N-1, or linkN_tail for i = N-1
+    // link2_tail (i=1) uses link_jacobians_linear_[2] (link3 head)
+    // link3_tail (i=2) uses link_jacobians_linear_[3] (link4 head)
+    // linkN_tail (i=N-1) uses link_jacobians_linear_[link_num_] (linkN tail)
+    int jac_idx = (i < link_num_ - 1) ? (i + 1) : link_num_;
+    Eigen::Vector3d tail_vel_root = link_jacobians_linear_[jac_idx] * dq;
     Eigen::Vector3d tail_vel_world = R_world_to_root_ * tail_vel_root;
     Eigen::Vector3d tail_total_vel_world;
     tail_total_vel_world(0) = root_vel_world_.x() + tail_vel_world(0);
@@ -1274,13 +1274,14 @@ std::vector<Eigen::Vector3d> DragonCopilot::getCurrentLinkTailPositions()
 std::vector<Eigen::Vector3d> DragonCopilot::getCurrentLinkTailPositionsWorld()
 {
   std::vector<Eigen::Vector3d> tail_positions_world;
-  tail_positions_world.reserve(link_num_);
+  tail_positions_world.reserve(link_num_ - 1);  // From link2 tail to linkN tail (N-1 tails)
 
-  // Get each link's tail position in WORLD frame
+  // Get each link's tail position in WORLD frame, starting from link2
+  // This matches the indexing of target_positions in computeSnakeTargetPositions
   // link_i's tail = link_(i+1)'s head for i < link_num
   // last link's tail = last link head + link_length * link_x_direction
 
-  for (int i = 0; i < link_num_; i++)
+  for (int i = 1; i < link_num_; i++)  // Start from link2 (i=1)
   {
     KDL::Vector tail_pos_root;
 
@@ -1462,10 +1463,15 @@ std::vector<Eigen::Vector3d> DragonCopilot::computeSnakeTargetPositions()
   // Use cached Eigen versions of root position and velocity
   Eigen::Vector3d root_pos_predicted = root_pos_world_eigen_ + root_vel_world_eigen_ * dt;
 
-  // Predicted root orientation (for simplicity, we only apply yaw rotation)
-  // omega_z * dt gives small angle rotation around z
-  double yaw_delta = root_omega_world_.z() * dt;
-  KDL::Rotation delta_rot = KDL::Rotation::RotZ(yaw_delta);
+  // Predicted root orientation using full angular velocity (expressed in world frame)
+  double omega_norm = root_omega_world_.Norm();
+  KDL::Rotation delta_rot = KDL::Rotation::Identity();
+  if (omega_norm > 1e-6)
+  {
+    KDL::Vector axis = root_omega_world_ / omega_norm;
+    delta_rot = KDL::Rotation::Rot(axis, omega_norm * dt);
+  }
+  // exp([omega] dt) * R_current (left-multiply because omega is in world frame)
   KDL::Rotation predicted_root_rot = delta_rot * world_to_root_.M;
 
   // Create predicted world_to_root transform
@@ -1532,19 +1538,25 @@ Eigen::VectorXd DragonCopilot::computeSnakeJointCommands(const std::vector<Eigen
   {
     // Position error in world frame
     // target_positions_world[i] is target for link(i+2) tail in world frame
-    // current_positions_world[i+1] is current position of link(i+2) tail in world frame
-    Eigen::Vector3d pos_error = target_positions_world[i] - current_positions_world[i + 1];
+    // current_positions_world[i] is current position of link(i+2) tail in world frame (now aligned)
+    Eigen::Vector3d pos_error = target_positions_world[i] - current_positions_world[i];
 
     // Desired velocity to correct the error (scaled by gain) minus root motion contribution
     // This ensures that joint motion compensates for the difference between
-    // desired link motion and root frame motion
-    Eigen::Vector3d desired_joint_vel_contribution = snake_ik_gain_ * pos_error / dt - root_vel;
+    // desired link motion and root frame motion (translation + rotation)
+    Eigen::Vector3d omega_world(root_omega_world_.x(), root_omega_world_.y(), root_omega_world_.z());
+    Eigen::Vector3d relative_pos = current_positions_world[i] - root_pos_world_eigen_;
+    Eigen::Vector3d root_motion = root_vel + omega_world.cross(relative_pos);
+    Eigen::Vector3d desired_joint_vel_contribution = snake_ik_gain_ * pos_error / dt - root_motion;
 
     // Get Jacobian for this link tail and transform to world frame
-    // link_jacobians_linear_[i] is in root frame
-    if (i < static_cast<int>(link_jacobians_linear_.size()))
+    // i=0: link2_tail = link3_head, use link_jacobians_linear_[2]
+    // i=1: link3_tail = link4_head, use link_jacobians_linear_[3]
+    // i=N-2: linkN_tail, use link_jacobians_linear_[link_num_]
+    int jac_idx = (i < link_num_ - 2) ? (i + 2) : link_num_;
+    if (jac_idx < static_cast<int>(link_jacobians_linear_.size()))
     {
-      const Eigen::MatrixXd& J_root = link_jacobians_linear_[i];
+      const Eigen::MatrixXd& J_root = link_jacobians_linear_[jac_idx];
       Eigen::MatrixXd J_world = R_world_to_root_ * J_root;  // Transform to world frame
 
       // Fill in constraint matrix: J_world * dq = desired_joint_vel_contribution * dt
@@ -1558,6 +1570,9 @@ Eigen::VectorXd DragonCopilot::computeSnakeJointCommands(const std::vector<Eigen
   Eigen::MatrixXd AtA = A.transpose() * A + damping * Eigen::MatrixXd::Identity(link_joint_num_, link_joint_num_);
   Eigen::VectorXd Atb = A.transpose() * b;
   dq = AtA.ldlt().solve(Atb);
+
+  // DEBUG: Override dq with fixed values for testing
+  dq << 0.1, 0.0, 0.0, 0.0, 0.0, 0.0;
 
   //   Clamp joint deltas to maximum allowed change
   for (int i = 0; i < link_joint_num_; i++)
@@ -1585,7 +1600,7 @@ void DragonCopilot::executeSnakeFollowing()
   // Step 2: Check if trajectory buffer has sufficient arc length for snake following
   // We need at least (link_num_ - 1) * link_length_ arc length to compute valid targets
   // for all link tails (link2, link3, link4 in a 4-link robot)
-  double min_required_arc_length = (link_num_ - 1) * link_length_;
+  double min_required_arc_length = (link_num_)*link_length_;
   bool trajectory_ready = (total_arc_length_ >= min_required_arc_length);
 
   if (!trajectory_ready)
@@ -1605,33 +1620,33 @@ void DragonCopilot::executeSnakeFollowing()
   snake_target_positions_world_ = computeSnakeTargetPositions();
 
   // Debug output: print target positions (in world frame)
-  {
-    std::stringstream ss_target;
-    ss_target << "[DragonCopilot] Target positions (world frame): ";
-    for (size_t i = 0; i < snake_target_positions_world_.size(); i++)
-    {
-      ss_target << "Link" << (i + 2) << "=[" << std::fixed << std::setprecision(3)
-                << snake_target_positions_world_[i].x() << ", " << snake_target_positions_world_[i].y() << ", "
-                << snake_target_positions_world_[i].z() << "] ";
-    }
-    ROS_INFO_THROTTLE(1.0, "%s", ss_target.str().c_str());
-  }
+  //   {
+  //     std::stringstream ss_target;
+  //     ss_target << "[DragonCopilot] Target positions (world frame): ";
+  //     for (size_t i = 0; i < snake_target_positions_world_.size(); i++)
+  //     {
+  //       ss_target << "Link" << (i + 2) << "=[" << std::fixed << std::setprecision(3)
+  //                 << snake_target_positions_world_[i].x() << ", " << snake_target_positions_world_[i].y() << ", "
+  //                 << snake_target_positions_world_[i].z() << "] ";
+  //     }
+  //     ROS_INFO_THROTTLE(1.0, "%s", ss_target.str().c_str());
+  //   }
 
   // Step 5: Compute joint commands using IK (in world frame, considering root motion)
   // Uses cached snake_target_positions_world_ and snake_current_positions_world_
   Eigen::VectorXd dq = computeSnakeJointCommands(snake_target_positions_world_);
 
   // Debug output: print joint commands
-  std::stringstream ss;
-  ss << "[DragonCopilot] dq = [";
-  for (int i = 0; i < link_joint_num_; i++)
-  {
-    ss << dq(i);
-    if (i < link_joint_num_ - 1)
-      ss << ", ";
-  }
-  ss << "]";
-  ROS_INFO_THROTTLE(1.0, "%s", ss.str().c_str());
+  //   std::stringstream ss;
+  //   ss << "[DragonCopilot] dq = [";
+  //   for (int i = 0; i < link_joint_num_; i++)
+  //   {
+  //     ss << dq(i);
+  //     if (i < link_joint_num_ - 1)
+  //       ss << ", ";
+  //   }
+  //   ss << "]";
+  //   ROS_INFO_THROTTLE(1.0, "%s", ss.str().c_str());
 
   // Step 6: Publish joint commands (only if snake_joint_control_enabled_ is true)
   if (snake_joint_control_enabled_)
@@ -1673,38 +1688,14 @@ void DragonCopilot::visualizeSnakeTrajectory()
   }
   marker_array.markers.push_back(trajectory_line);
 
-  // Marker 2: Link1 tail position (cyan sphere) - use cached current positions
-  if (!snake_current_positions_world_.empty())
-  {
-    visualization_msgs::Marker link1_tail_sphere;
-    link1_tail_sphere.header.frame_id = "world";
-    link1_tail_sphere.header.stamp = current_time;
-    link1_tail_sphere.ns = "link1_tail";
-    link1_tail_sphere.id = 0;
-    link1_tail_sphere.type = visualization_msgs::Marker::SPHERE;
-    link1_tail_sphere.action = visualization_msgs::Marker::ADD;
-    link1_tail_sphere.pose.position.x = snake_current_positions_world_[0].x();  // link1 tail
-    link1_tail_sphere.pose.position.y = snake_current_positions_world_[0].y();
-    link1_tail_sphere.pose.position.z = snake_current_positions_world_[0].z();
-    link1_tail_sphere.pose.orientation.w = 1.0;
-    link1_tail_sphere.scale.x = 0.06;
-    link1_tail_sphere.scale.y = 0.06;
-    link1_tail_sphere.scale.z = 0.06;
-    link1_tail_sphere.color.r = 0.0;
-    link1_tail_sphere.color.g = 1.0;
-    link1_tail_sphere.color.b = 1.0;  // Cyan
-    link1_tail_sphere.color.a = 0.8;
-    marker_array.markers.push_back(link1_tail_sphere);
-  }
-
-  // Marker 3: Target positions for link tails (spheres) - use cached target positions
+  // Marker 2: Target positions for link tails (spheres) - use cached target positions
   for (size_t i = 0; i < snake_target_positions_world_.size(); i++)
   {
     visualization_msgs::Marker target_sphere;
     target_sphere.header.frame_id = "world";
     target_sphere.header.stamp = current_time;
     target_sphere.ns = "snake_targets";
-    target_sphere.id = i + 1;
+    target_sphere.id = i;
     target_sphere.type = visualization_msgs::Marker::SPHERE;
     target_sphere.action = visualization_msgs::Marker::ADD;
     target_sphere.pose.position.x = snake_target_positions_world_[i].x();
@@ -1721,14 +1712,14 @@ void DragonCopilot::visualizeSnakeTrajectory()
     marker_array.markers.push_back(target_sphere);
   }
 
-  // Marker 4: Current link tail positions (spheres for comparison) - use cached current positions
-  for (size_t i = 1; i < snake_current_positions_world_.size(); i++)  // Skip link1 tail (already shown as cyan)
+  // Marker 3: Current link tail positions (spheres for comparison) - use cached current positions
+  for (size_t i = 0; i < snake_current_positions_world_.size(); i++)  // From link2 tail to linkN tail
   {
     visualization_msgs::Marker current_sphere;
     current_sphere.header.frame_id = "world";
     current_sphere.header.stamp = current_time;
     current_sphere.ns = "snake_current";
-    current_sphere.id = i + 10;
+    current_sphere.id = i;
     current_sphere.type = visualization_msgs::Marker::SPHERE;
     current_sphere.action = visualization_msgs::Marker::ADD;
     current_sphere.pose.position.x = snake_current_positions_world_[i].x();
@@ -1744,35 +1735,6 @@ void DragonCopilot::visualizeSnakeTrajectory()
     current_sphere.color.a = 0.8;
     marker_array.markers.push_back(current_sphere);
   }
-
-  // Marker 5: Arc length markers along trajectory (for debugging) - already in world frame
-  //   for (int i = 1; i <= link_num_; i++)
-  //   {
-  //     double arc_length = i * link_length_;
-  //     if (arc_length <= total_arc_length_)
-  //     {
-  //       Eigen::Vector3d pos = findPositionAtArcLength(arc_length);
-  //       visualization_msgs::Marker arc_marker;
-  //       arc_marker.header.frame_id = "world";
-  //       arc_marker.header.stamp = current_time;
-  //       arc_marker.ns = "arc_length_markers";
-  //       arc_marker.id = i + 20;
-  //       arc_marker.type = visualization_msgs::Marker::CUBE;
-  //       arc_marker.action = visualization_msgs::Marker::ADD;
-  //       arc_marker.pose.position.x = pos.x();
-  //       arc_marker.pose.position.y = pos.y();
-  //       arc_marker.pose.position.z = pos.z();
-  //       arc_marker.pose.orientation.w = 1.0;
-  //       arc_marker.scale.x = 0.03;
-  //       arc_marker.scale.y = 0.03;
-  //       arc_marker.scale.z = 0.03;
-  //       arc_marker.color.r = 0.5;
-  //       arc_marker.color.g = 0.5;
-  //       arc_marker.color.b = 1.0;  // Light blue
-  //       arc_marker.color.a = 0.8;
-  //       marker_array.markers.push_back(arc_marker);
-  //     }
-  //   }
 
   snake_trajectory_viz_pub_.publish(marker_array);
 }
