@@ -69,9 +69,13 @@ struct TrajectoryPoint
 {
   Eigen::Vector3d position;  // Position in world frame [m]
   double timestamp;          // Time when this point was recorded [s]
-  
-  TrajectoryPoint() : position(Eigen::Vector3d::Zero()), timestamp(0.0) {}
-  TrajectoryPoint(const Eigen::Vector3d& pos, double t) : position(pos), timestamp(t) {}
+
+  TrajectoryPoint() : position(Eigen::Vector3d::Zero()), timestamp(0.0)
+  {
+  }
+  TrajectoryPoint(const Eigen::Vector3d& pos, double t) : position(pos), timestamp(t)
+  {
+  }
 };
 
 class DragonCopilot : public DragonNavigator
@@ -208,23 +212,25 @@ private:
   void visualizeTrajectory();
 
   /* ===== Copilot Control Parameters ===== */
-  double max_copilot_x_vel_;       // maximum forward/backward velocity
-  double max_copilot_y_vel_;       // maximum lateral velocity
-  double max_copilot_z_vel_;       // maximum vertical velocity
-  double max_copilot_yaw_vel_;     // maximum yaw angular velocity
-  double max_copilot_pitch_vel_;   // maximum pitch angular velocity for attitude control
-  double trigger_deadzone_;        // deadzone for L2/R2 triggers
+  double max_copilot_x_vel_;      // maximum forward/backward velocity
+  double max_copilot_y_vel_;      // maximum lateral velocity
+  double max_copilot_z_vel_;      // maximum vertical velocity
+  double max_copilot_yaw_vel_;    // maximum yaw angular velocity
+  double max_copilot_pitch_vel_;  // maximum pitch angular velocity for attitude control
+  double trigger_deadzone_;       // deadzone for L2/R2 triggers
 
   /* ===== Joystick State Tracking ===== */
-  bool r2_trigger_initialized_;   // true after R2 has been pressed at least once
-  bool l2_trigger_initialized_;   // true after L2 has been pressed at least once
-  double root_pitch_cmd_;   // commanded root pitch angle
-  double root_yaw_cmd_;     // commanded root yaw angle
-  bool hold_attitude_on_idle_;    // flag to enable attitude hold when no input (default: true)
+  bool r2_trigger_initialized_;  // true after R2 has been pressed at least once
+  bool l2_trigger_initialized_;  // true after L2 has been pressed at least once
+  double root_pitch_cmd_;        // commanded root pitch angle
+  double root_yaw_cmd_;          // commanded root yaw angle
+  bool hold_attitude_on_idle_;   // flag to enable attitude hold when no input (default: true)
 
   /* ===== Robot Model Parameters (initialized once) ===== */
   int link_num_;                                         // Number of robot links (equals rotor number)
   double link_length_;                                   // Length of each link segment [m]
+  std::vector<double> link_joint_lower_limits_;          // Joint angle lower limits [rad] (from URDF)
+  std::vector<double> link_joint_upper_limits_;          // Joint angle upper limits [rad] (from URDF)
   int moveable_joint_num_;                               // Number of moveable joints (excluding rotor joints)
   int kdl_tree_joint_num_;                               // Total number of joints in the robot tree
   int link_joint_num_;                                   // Number of link joints (cached size of link_joint_indices_)
@@ -233,11 +239,11 @@ private:
   std::unique_ptr<KDL::TreeJntToJacSolver> jac_solver_;  // KDL Jacobian solver
 
   /* ===== Cached Transformations (updated once per control cycle) ===== */
-  KDL::Frame world_to_cog_;        // CoG frame in world coordinates
-  KDL::Frame world_to_baselink_;   // Baselink frame in world coordinates
-  KDL::Frame world_to_root_;       // Root frame in world coordinates
-  KDL::Frame root_to_baselink_;    // Transform from root (link1) to baselink (FC)
-  KDL::Frame baselink_to_root_;    // Transform from baselink to root
+  KDL::Frame world_to_cog_;          // CoG frame in world coordinates
+  KDL::Frame world_to_baselink_;     // Baselink frame in world coordinates
+  KDL::Frame world_to_root_;         // Root frame in world coordinates
+  KDL::Frame root_to_baselink_;      // Transform from root (link1) to baselink (FC)
+  KDL::Frame baselink_to_root_;      // Transform from baselink to root
   Eigen::Matrix3d R_world_to_root_;  // Rotation matrix from world to root frame
 
   /* ===== Cached Joint State ===== */
@@ -249,29 +255,27 @@ private:
 
   /* ===== Cached Jacobians ===== */
   // Jacobians map joint velocities to link frame velocities: v_link = J * q_dot
-  // Each Jacobian has 6 rows (linear xyz + angular xyz) and N columns (number of joints)
-  // link_jacobians_[i-1] contains the Jacobian for link{i} (i.e., index 0 = link1, index 1 = link2, etc.)
-  std::vector<KDL::Jacobian> link_jacobians_;
   // Linear parts of Jacobians (first 3 rows: x, y, z velocities)
   // Pre-computed for efficiency to avoid repeated extraction in constraint generation
+  // link_jacobians_linear_[i] corresponds to link(i+1)'s head Jacobian
+  // link_jacobians_linear_[link_num_] = linkN tail Jacobian
   std::vector<Eigen::MatrixXd> link_jacobians_linear_;
 
   /* ===== Cached Root Frame Velocities ===== */
-  KDL::Vector root_vel_body_;      // Root velocity in body frame [m/s]
-  KDL::Vector root_vel_world_;     // Root velocity in world frame [m/s]
-  KDL::Vector root_omega_body_;    // Root angular velocity in body frame [rad/s]
-  KDL::Vector root_omega_world_;   // Root angular velocity in world frame [rad/s]
+  KDL::Vector root_vel_world_;    // Root velocity in world frame [m/s]
+  KDL::Vector root_omega_world_;  // Root angular velocity in world frame [rad/s]
 
   /* ===== Cached Eigen Conversions (from KDL types) ===== */
-  Eigen::Vector3d root_pos_world_eigen_;   // Root position in world frame (Eigen version of world_to_root_.p)
-  Eigen::Vector3d root_vel_world_eigen_;   // Root velocity in world frame (Eigen version of root_vel_world_)
+  Eigen::Vector3d root_pos_world_eigen_;  // Root position in world frame (Eigen version of world_to_root_.p)
+  Eigen::Vector3d root_vel_world_eigen_;  // Root velocity in world frame (Eigen version of root_vel_world_)
 
   /* ===== MINCO Trajectory ===== */
   minco::MINCO_S3NU minco_;           // MINCO trajectory generator for minimum jerk (s=3)
   Trajectory<5> current_trajectory_;  // Current trajectory being executed
   // Computed trajectory velocity directions
-  std::vector<Eigen::Vector3d> link_vel_directions_;       // Velocity directions for each link (from link2) in world frame
-  std::vector<Eigen::Vector3d> link_vel_directions_root_;  // Velocity directions for each link (from link2) in root frame
+  std::vector<Eigen::Vector3d> link_vel_directions_;  // Velocity directions for each link (from link2) in world frame
+  std::vector<Eigen::Vector3d> link_vel_directions_root_;  // Velocity directions for each link (from link2) in root
+                                                           // frame
 
   /* ===== Snake Following Parameters ===== */
   bool snake_mode_enabled_;              // Flag to enable/disable snake following visualization
@@ -289,7 +293,8 @@ private:
 
   /* ===== Snake Following Cached Values (updated once per control cycle) ===== */
   std::vector<Eigen::Vector3d> snake_target_positions_world_;   // Cached target positions for link tails in world frame
-  std::vector<Eigen::Vector3d> snake_current_positions_world_;  // Cached current positions for link tails in world frame
+  std::vector<Eigen::Vector3d> snake_current_positions_world_;  // Cached current positions for link tails in world
+                                                                // frame
 
   /* ===== ROS Publishers ===== */
   ros::Publisher trajectory_viz_pub_;        // Publisher for MINCO trajectory visualization
@@ -309,18 +314,20 @@ private:
   void cacheFrameTransforms();
 
   /**
-   * @brief Compute and cache Jacobians for link3 to linkN heads
+   * @brief Compute and cache linear Jacobians for all link heads
    *
-   * Computes Jacobians for link3 onwards (used for velocity constraints on link2 to linkN-1 tails).
-   * Requires link_frames_ to be populated first by cacheLinkFrames().
+   * Computes linear Jacobians (first 3 rows) for link1 to linkN heads.
+   * Results are stored in link_jacobians_linear_.
+   * Requires link_frames_ to be populated first by cacheFrameTransforms().
    */
   void cacheJacobians();
 
   /**
-   * @brief Compute and cache Jacobian for the last link's tail position
+   * @brief Compute and cache linear Jacobian for the last link's tail position
    *
    * The tail Jacobian is computed from the head Jacobian plus the rotational
    * contribution from the offset vector (head to tail).
+   * Result is appended to link_jacobians_linear_.
    */
   void cacheLastLinkTailJacobian();
 
@@ -328,15 +335,13 @@ private:
    * @brief Cache root frame velocities from command input
    *
    * This method computes and caches the root frame velocities (both linear and angular)
-   * in both body frame and world frame. Should be called once per control cycle after
+   * in world frame. Should be called once per control cycle after
    * updateTransformationCache() to avoid redundant calculations across multiple functions.
    *
    * Updates:
-   * - root_vel_body_: Linear velocity command in root body frame
    * - root_vel_world_: Linear velocity transformed to world frame
-   * - root_omega_body_: Angular velocity command in root body frame
+   * - root_vel_world_eigen_: Eigen version of root velocity
    * - root_omega_world_: Angular velocity transformed to world frame
-   * - R_world_to_root_: Rotation matrix cached for other computations
    *
    * @param root_cmd Root frame command structure containing velocity commands
    */
