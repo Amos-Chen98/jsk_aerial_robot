@@ -92,6 +92,13 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
     link_joint_num_ = link_joint_indices_.size();
     ROS_INFO("[DragonCopilot] Link joint indices initialized: %d joints", link_joint_num_);
 
+    // Get joint limits from URDF model
+    link_joint_lower_limits_ = transformable_model->getLinkJointLowerLimits();
+    link_joint_upper_limits_ = transformable_model->getLinkJointUpperLimits();
+    ROS_INFO("[DragonCopilot] Joint limits loaded from URDF: lower=[%.3f, ...], upper=[%.3f, ...]",
+             link_joint_lower_limits_.empty() ? 0.0 : link_joint_lower_limits_[0],
+             link_joint_upper_limits_.empty() ? 0.0 : link_joint_upper_limits_[0]);
+
     std::stringstream ss;
     ss << "[DragonCopilot] Link joint indices: ";
     for (const auto& idx : link_joint_indices_)
@@ -124,9 +131,7 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
       nh_.subscribe("copilot/reset_trajectory", 1, &DragonCopilot::resetTrajectoryBufferCallback, this);
 
   /* Initialize cached velocities */
-  root_vel_body_ = KDL::Vector::Zero();
   root_vel_world_ = KDL::Vector::Zero();
-  root_omega_body_ = KDL::Vector::Zero();
   root_omega_world_ = KDL::Vector::Zero();
 }
 
@@ -470,8 +475,6 @@ void DragonCopilot::cacheFrameTransforms()
 
 void DragonCopilot::cacheJacobians()
 {
-  link_jacobians_.clear();
-  link_jacobians_.reserve(link_num_);  // link1 to linkN heads
   link_jacobians_linear_.clear();
   link_jacobians_linear_.reserve(link_num_);
 
@@ -483,7 +486,7 @@ void DragonCopilot::cacheJacobians()
   }
 
   // Compute and store Jacobians for all link heads (link1 to linkN)
-  // link_jacobians_[i] corresponds to link(i+1)'s head Jacobian
+  // link_jacobians_linear_[i] corresponds to link(i+1)'s head Jacobian
   // Note: link(i+1)'s head = link(i)'s tail for i >= 1
   for (int i = 0; i < link_num_; i++)
   {
@@ -513,9 +516,6 @@ void DragonCopilot::cacheJacobians()
       }
     }
 
-    // Store Jacobian for all links
-    link_jacobians_.push_back(reduced_jacobian);
-
     // Extract and cache the linear part (first 3 rows) for efficiency
     Eigen::MatrixXd linear_jacobian = reduced_jacobian.data.block(0, 0, 3, link_joint_num_);
     link_jacobians_linear_.push_back(linear_jacobian);
@@ -524,7 +524,7 @@ void DragonCopilot::cacheJacobians()
 
 void DragonCopilot::cacheLastLinkTailJacobian()
 {
-  // Compute and append linkN tail Jacobian to the end of link_jacobians_ and link_jacobians_linear_
+  // Compute and append linkN tail Jacobian to the end of link_jacobians_linear_
   // After this: link_jacobians_linear_[link_num_] = linkN tail Jacobian
   // linkN tail position = linkN head position + link_length * linkN x-axis direction
   const std::string& last_link_name = link_names_[link_num_ - 1];
@@ -586,8 +586,6 @@ void DragonCopilot::cacheLastLinkTailJacobian()
     reduced_jacobian_tail(5, col_idx) = omega(2);
   }
 
-  link_jacobians_.push_back(reduced_jacobian_tail);
-
   // Extract and cache the linear part for linkN tail
   Eigen::MatrixXd linear_jacobian_tail = reduced_jacobian_tail.data.block(0, 0, 3, link_joint_num_);
   link_jacobians_linear_.push_back(linear_jacobian_tail);
@@ -595,12 +593,12 @@ void DragonCopilot::cacheLastLinkTailJacobian()
 
 void DragonCopilot::cacheRootFrameVelocities(const RootFrameCommand& root_cmd)
 {
-  // Cache root frame body velocities
+  // Compute root frame body velocities (local variables)
   // Note: x and y velocities are in root body frame, z velocity is in world frame
-  root_vel_body_ = KDL::Vector(root_cmd.x_vel, root_cmd.y_vel, 0.0);
+  KDL::Vector root_vel_body(root_cmd.x_vel, root_cmd.y_vel, 0.0);
 
   // Transform to world frame
-  root_vel_world_ = world_to_root_.M * root_vel_body_;
+  root_vel_world_ = world_to_root_.M * root_vel_body;
 
   // Add world frame z velocity component
   root_vel_world_.z(root_vel_world_.z() + root_cmd.z_vel);
@@ -608,12 +606,12 @@ void DragonCopilot::cacheRootFrameVelocities(const RootFrameCommand& root_cmd)
   // Cache Eigen version of root velocity in world frame
   root_vel_world_eigen_ << root_vel_world_.x(), root_vel_world_.y(), root_vel_world_.z();
 
-  // Cache root frame angular velocities
+  // Compute root frame angular velocities (local variable)
   // pitch_vel is around y-axis in body frame, yaw_vel is around z-axis
-  root_omega_body_ = KDL::Vector(0.0, root_cmd.pitch_vel, root_cmd.yaw_vel);
+  KDL::Vector root_omega_body(0.0, root_cmd.pitch_vel, root_cmd.yaw_vel);
 
   // Transform to world frame
-  root_omega_world_ = world_to_root_.M * root_omega_body_;
+  root_omega_world_ = world_to_root_.M * root_omega_body;
 }
 
 void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
@@ -848,7 +846,7 @@ void DragonCopilot::generateJointCommands(const RootFrameCommand& root_cmd)
   }
 
   // Check if we have valid Jacobians and velocity directions
-  if (link_jacobians_.empty() || link_vel_directions_root_.empty())
+  if (link_jacobians_linear_.empty() || link_vel_directions_root_.empty())
   {
     ROS_WARN_THROTTLE(1.0, "[DragonCopilot] Jacobians or velocity directions not computed yet");
     return;
@@ -1033,6 +1031,13 @@ void DragonCopilot::publishJointCommands(const Eigen::VectorXd& dq)
   }
 
   Eigen::VectorXd target_link_joint_positions = current_link_joint_positions + dq;
+
+  // Clamp joint positions to joint limits (from URDF)
+  for (int i = 0; i < link_joint_num_; i++)
+  {
+    target_link_joint_positions(i) =
+        std::clamp(target_link_joint_positions(i), link_joint_lower_limits_[i], link_joint_upper_limits_[i]);
+  }
 
   // Publish joint command message
   sensor_msgs::JointState joint_control_msg;
@@ -1572,7 +1577,7 @@ Eigen::VectorXd DragonCopilot::computeSnakeJointCommands(const std::vector<Eigen
   dq = AtA.ldlt().solve(Atb);
 
   // DEBUG: Override dq with fixed values for testing
-  dq << 0.1, 0.0, 0.0, 0.0, 0.0, 0.0;
+  dq << 0.0, 0.0, 0.0, 0.0, 0.0, -1.0;
 
   //   Clamp joint deltas to maximum allowed change
   for (int i = 0; i < link_joint_num_; i++)
@@ -1637,16 +1642,16 @@ void DragonCopilot::executeSnakeFollowing()
   Eigen::VectorXd dq = computeSnakeJointCommands(snake_target_positions_world_);
 
   // Debug output: print joint commands
-  //   std::stringstream ss;
-  //   ss << "[DragonCopilot] dq = [";
-  //   for (int i = 0; i < link_joint_num_; i++)
-  //   {
-  //     ss << dq(i);
-  //     if (i < link_joint_num_ - 1)
-  //       ss << ", ";
-  //   }
-  //   ss << "]";
-  //   ROS_INFO_THROTTLE(1.0, "%s", ss.str().c_str());
+  std::stringstream ss;
+  ss << "[DragonCopilot] dq = [";
+  for (int i = 0; i < link_joint_num_; i++)
+  {
+    ss << dq(i);
+    if (i < link_joint_num_ - 1)
+      ss << ", ";
+  }
+  ss << "]";
+  ROS_INFO_THROTTLE(1.0, "%s", ss.str().c_str());
 
   // Step 6: Publish joint commands (only if snake_joint_control_enabled_ is true)
   if (snake_joint_control_enabled_)
