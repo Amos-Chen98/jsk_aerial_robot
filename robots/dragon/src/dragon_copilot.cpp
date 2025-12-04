@@ -22,11 +22,10 @@ DragonCopilot::DragonCopilot()
   , link_num_(0)       // Will be initialized from robot model
   , link_length_(0.5)  // Default value, will be updated from robot model
   , snake_mode_enabled_(true)
-  , snake_joint_control_enabled_(false)  // Disabled by default for safety
-  , trajectory_sample_interval_(0.01)    // 1cm minimum distance between samples
-  , trajectory_buffer_max_length_(3.0)   // Store up to 3m of trajectory
-  , snake_ik_gain_(1.0)                  // IK gain
-  , snake_max_joint_delta_(0.1)          // Max 0.1 rad per iteration
+  , trajectory_sample_interval_(0.01)   // 1cm minimum distance between samples
+  , trajectory_buffer_max_length_(3.0)  // Store up to 3m of trajectory
+  , snake_ik_gain_(1.0)                 // IK gain
+  , snake_max_joint_delta_(0.1)         // Max 0.1 rad per iteration
   , total_arc_length_(0.0)
   , trajectory_initialized_(false)
 {
@@ -135,14 +134,12 @@ void DragonCopilot::rosParamInit()
 
   /* Load snake-following parameters */
   getParam<bool>(navi_nh, "snake_mode_enabled", snake_mode_enabled_, true);
-  getParam<bool>(navi_nh, "snake_joint_control_enabled", snake_joint_control_enabled_, false);
   getParam<double>(navi_nh, "trajectory_sample_interval", trajectory_sample_interval_, 0.01);
   getParam<double>(navi_nh, "trajectory_buffer_max_length", trajectory_buffer_max_length_, 3.0);
   getParam<double>(navi_nh, "snake_ik_gain", snake_ik_gain_, 1.0);
   getParam<double>(navi_nh, "snake_max_joint_delta", snake_max_joint_delta_, 0.1);
 
   ROS_INFO("[DragonCopilot] Snake following mode: %s", snake_mode_enabled_ ? "enabled" : "disabled");
-  ROS_INFO("[DragonCopilot] Snake joint control: %s", snake_joint_control_enabled_ ? "enabled" : "disabled");
   ROS_INFO("[DragonCopilot] - Trajectory sample interval: %.3f m", trajectory_sample_interval_);
   ROS_INFO("[DragonCopilot] - Trajectory buffer max length: %.2f m", trajectory_buffer_max_length_);
 }
@@ -365,29 +362,15 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
 
 void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& root_cmd)
 {
-  /* Transform velocity commands from root frame to CoG velocity targets */
-  // - Root frame: the first link of the robot (link1 in Dragon URDF), what the user wants to control
-  // - Baselink frame: the FC (flight controller) frame, what the controller uses
-  // - CoG: center of gravity, what the controller actually tracks
-
-  // ===== Step 1: Cache transformations, positions, and velocities =====
   cacheFrameTransforms();
   cacheJacobians();
   cacheLastLinkTailJacobian();
   cacheRootFrameVelocities(root_cmd);
 
-  // ===== Step 2: Compute and set CoG velocity targets =====
+  getJoint1DqFromJoystick(root_cmd);
   setCoGVelocityTargets(root_cmd);
-
-  // ===== Step 3: Update baselink attitude target (maintain level flight) =====
-  setBaselinkAttitudeTarget(root_cmd);
-
-  // ===== Step 4: Compute joint1 dq from joystick input =====
-  setJoint1DqFromJoystick(root_cmd);
-
-  // ===== Step 5: Compute and publish all joint commands =====
-  // This handles snake following (if enabled) and merges with joint1 dq
   computeAndPublishJointCommands();
+  setBaselinkAttitudeTarget(root_cmd);
 }
 
 void DragonCopilot::cacheFrameTransforms()
@@ -441,6 +424,15 @@ void DragonCopilot::cacheFrameTransforms()
   {
     const std::string& link_name = link_names_[i];
     link_frames_.push_back(seg_tf_map.at(link_name));
+  }
+
+  // Cache link2 head position in world frame (for trajectory recording)
+  // link_frames_[1] is link2's frame in root coordinates
+  if (link_num_ >= 2)
+  {
+    KDL::Vector link2_head_root = link_frames_[1].p;
+    KDL::Vector link2_head_world = world_to_root_.M * link2_head_root + world_to_root_.p;
+    link2_head_pos_world_eigen_ << link2_head_world.x(), link2_head_world.y(), link2_head_world.z();
   }
 }
 
@@ -643,14 +635,8 @@ void DragonCopilot::setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd)
   final_target_baselink_rot_.setRPY(curr_baselink_r, curr_baselink_p, 0);
 }
 
-void DragonCopilot::setJoint1DqFromJoystick(const RootFrameCommand& root_cmd)
+void DragonCopilot::getJoint1DqFromJoystick(const RootFrameCommand& root_cmd)
 {
-  // Compute joint1 dq (velocity increment) from joystick input
-  // pitch_vel controls joint1_pitch (index 0 in link_joint_indices_)
-  // yaw_vel controls joint1_yaw (index 1 in link_joint_indices_)
-
-  // Compute dq from velocity commands: dq = velocity * dt
-  // Joint limits will be enforced in publishJointCommands()
   joint1_dq_(0) = root_cmd.pitch_vel * loop_du_;
   joint1_dq_(1) = root_cmd.yaw_vel * loop_du_;
 
@@ -703,8 +689,9 @@ void DragonCopilot::resetTrajectoryBufferCallback(const std_msgs::EmptyConstPtr&
 
 void DragonCopilot::updateTrajectoryBuffer()
 {
-  // Use cached root position in world frame (already updated in cacheFrameTransforms)
-  const Eigen::Vector3d& current_position = root_pos_world_eigen_;
+  // Use cached link2 head position in world frame (already updated in cacheFrameTransforms)
+  // This is the reference point for snake following - we record where link2 head has been
+  const Eigen::Vector3d& current_position = link2_head_pos_world_eigen_;
   double current_time = ros::Time::now().toSec();
 
   // Initialize if this is the first point
@@ -713,8 +700,8 @@ void DragonCopilot::updateTrajectoryBuffer()
     trajectory_buffer_.push_front(TrajectoryPoint(current_position, current_time));
     last_recorded_position_ = current_position;
     trajectory_initialized_ = true;
-    ROS_INFO("[DragonCopilot] Trajectory buffer initialized at position [%.3f, %.3f, %.3f]", current_position.x(),
-             current_position.y(), current_position.z());
+    ROS_INFO("[DragonCopilot] Trajectory buffer initialized at link2 head position [%.3f, %.3f, %.3f]",
+             current_position.x(), current_position.y(), current_position.z());
     return;
   }
 
@@ -962,13 +949,9 @@ std::vector<Eigen::Vector3d> DragonCopilot::computeSnakeTargetPositions()
     return target_positions;
   }
 
-  // Use PREDICTED root frame state after dt to align with root_cmd timing
+  // Use PREDICTED link2 head position after dt to align with root_cmd timing
   // dt is the actual control loop period from the system
   double dt = loop_du_;
-
-  // Predicted root position in world frame: p_root_predicted = p_root_current + v_root * dt
-  // Use cached Eigen versions of root position and velocity
-  Eigen::Vector3d root_pos_predicted = root_pos_world_eigen_ + root_vel_world_eigen_ * dt;
 
   // Predicted root orientation using full angular velocity (expressed in world frame)
   double omega_norm = root_omega_world_.Norm();
@@ -981,31 +964,42 @@ std::vector<Eigen::Vector3d> DragonCopilot::computeSnakeTargetPositions()
   // exp([omega] dt) * R_current (left-multiply because omega is in world frame)
   KDL::Rotation predicted_root_rot = delta_rot * world_to_root_.M;
 
+  // Predicted root position in world frame: p_root_predicted = p_root_current + v_root * dt
+  Eigen::Vector3d root_pos_predicted = root_pos_world_eigen_ + root_vel_world_eigen_ * dt;
+
   // Create predicted world_to_root transform
   KDL::Frame world_to_root_predicted;
   world_to_root_predicted.p = KDL::Vector(root_pos_predicted.x(), root_pos_predicted.y(), root_pos_predicted.z());
   world_to_root_predicted.M = predicted_root_rot;
 
-  // Iteratively compute target positions for each link tail
-  // The key constraint: each link tail must be exactly link_length_ away from its head
-  // link(i) head is fixed, we find link(i) tail on trajectory at distance link_length_ from head
+  // Compute predicted link2 head position in world frame
+  // link_frames_[1] is link2's frame in root coordinates
+  KDL::Frame link2_head_frame_world = world_to_root_predicted * link_frames_[1];
+  Eigen::Vector3d link2_head_predicted(link2_head_frame_world.p.x(), link2_head_frame_world.p.y(),
+                                       link2_head_frame_world.p.z());
 
-  // Start with link2: its head = link1's tail, computed with PREDICTED root frame
-  KDL::Frame link2_head_frame_world =
-      world_to_root_predicted * link_frames_[1];  // link_frames_[1] = link2 frame in root
-  Eigen::Vector3d current_head_world(link2_head_frame_world.p.x(), link2_head_frame_world.p.y(),
-                                     link2_head_frame_world.p.z());
+  // Iteratively find target positions for each link tail along the trajectory
+  // The trajectory records link2 head history. For each link, we search from its HEAD
+  // (which is the previous link's tail target) to find a point at exactly link_length distance.
+  // This iterative approach ensures:
+  // - link2 tail target: at distance link_length from link2 head (predicted)
+  // - link3 tail target: at distance link_length from link2 tail target (= link3 head)
+  // - link4 tail target: at distance link_length from link3 tail target (= link4 head)
+  // Each target lies precisely on the trajectory with correct distance constraint.
+
+  // Start from predicted link2 head position
+  Eigen::Vector3d current_head = link2_head_predicted;
 
   for (int i = 1; i < link_num_; i++)  // i = 1, 2, 3 for 4-link robot (link2, link3, link4)
   {
-    // Find target tail position on trajectory at exactly link_length_ from current head
-    Eigen::Vector3d target_tail_world = findPointOnTrajectoryAtDistance(current_head_world, link_length_);
+    // Find target tail position on trajectory at exactly link_length from current head
+    Eigen::Vector3d target_tail_world = findPointOnTrajectoryAtDistance(current_head, link_length_);
 
     // Store target in WORLD frame (we'll use world frame Jacobian for IK)
     target_positions.push_back(target_tail_world);
 
-    // For next iteration: the next link's head = current link's tail (target position)
-    current_head_world = target_tail_world;
+    // For next iteration: the next link's head = current link's tail target
+    current_head = target_tail_world;
   }
 
   return target_positions;
@@ -1081,15 +1075,6 @@ Eigen::VectorXd DragonCopilot::computeSnakeJointCommands(const std::vector<Eigen
   //   // DEBUG: Override dq with fixed values for testing
   //   dq << 0.0, 0.0, 0.0, 0.0, 0.0, -1.0;
 
-  //   Clamp joint deltas to maximum allowed change
-  for (int i = 0; i < link_joint_num_; i++)
-  {
-    if (dq(i) > snake_max_joint_delta_)
-      dq(i) = snake_max_joint_delta_;
-    else if (dq(i) < -snake_max_joint_delta_)
-      dq(i) = -snake_max_joint_delta_;
-  }
-
   return dq;
 }
 
@@ -1097,53 +1082,45 @@ void DragonCopilot::computeAndPublishJointCommands()
 {
   // Initialize dq to zero for all joints
   Eigen::VectorXd dq = Eigen::VectorXd::Zero(link_joint_num_);
+  // Update trajectory buffer with current link2 head position
+  updateTrajectoryBuffer();
 
-  // Step 1: If snake mode is enabled, compute snake following dq for joint2 onwards
-  if (snake_mode_enabled_)
+  // Check if trajectory buffer has sufficient arc length
+  // For N links, we need to find points at distances 1, 2, ..., (N-1) link lengths from link2 head
+  // So minimum required arc length is (N-1) * link_length
+  double min_required_arc_length = (link_num_ - 1) * link_length_;
+  bool trajectory_ready = (total_arc_length_ >= min_required_arc_length);
+
+  if (trajectory_ready)
   {
-    // Update trajectory buffer with current root position
-    updateTrajectoryBuffer();
-
-    // Check if trajectory buffer has sufficient arc length
-    double min_required_arc_length = link_num_ * link_length_;
-    bool trajectory_ready = (total_arc_length_ >= min_required_arc_length);
-
-    if (trajectory_ready)
-    {
-      // Cache current link tail positions (in WORLD frame)
-      snake_current_positions_world_ = getCurrentLinkTailPositionsWorld();
-
-      // Compute target positions for each link tail (in WORLD frame)
-      snake_target_positions_world_ = computeSnakeTargetPositions();
-
-      // Compute snake IK dq (only affects joint2 onwards in practice)
-      dq = computeSnakeJointCommands(snake_target_positions_world_);
-    }
-    else
-    {
-      ROS_INFO_THROTTLE(1.0, "[DragonCopilot] Waiting for trajectory buffer: %.2f / %.2f m (%.1f%%)", total_arc_length_,
-                        min_required_arc_length, 100.0 * total_arc_length_ / min_required_arc_length);
-    }
-
-    // Visualize trajectory
-    visualizeSnakeTrajectory();
+    snake_current_positions_world_ = getCurrentLinkTailPositionsWorld();
+    snake_target_positions_world_ = computeSnakeTargetPositions();
+  }
+  else
+  {
+    ROS_INFO_THROTTLE(1.0, "[DragonCopilot] Waiting for trajectory buffer: %.2f / %.2f m (%.1f%%)", total_arc_length_,
+                      min_required_arc_length, 100.0 * total_arc_length_ / min_required_arc_length);
   }
 
-  // Step 2: Merge joint1 dq from joystick (always applied)
-  if (link_joint_num_ >= 2)
+  // Visualize trajectory
+  visualizeSnakeTrajectory();
+
+  if (snake_mode_enabled_ && trajectory_ready)
   {
-    dq(0) = joint1_dq_(0);  // joint1_pitch dq from joystick
-    dq(1) = joint1_dq_(1);  // joint1_yaw dq from joystick
+    // Compute snake IK dq (only affects joint2 onwards in practice)
+    dq = computeSnakeJointCommands(snake_target_positions_world_);
   }
 
-  // Step 3: If snake joint control is disabled, zero out joint2+ dq
-  // (only joint1 from joystick will be applied)
-  if (!snake_joint_control_enabled_)
+  dq(0) += joint1_dq_(0);
+  dq(1) += joint1_dq_(1);
+
+  //   Clamp joint deltas to maximum allowed change
+  for (int i = 0; i < link_joint_num_; i++)
   {
-    for (int i = 2; i < link_joint_num_; i++)
-    {
-      dq(i) = 0.0;
-    }
+    if (dq(i) > snake_max_joint_delta_)
+      dq(i) = snake_max_joint_delta_;
+    else if (dq(i) < -snake_max_joint_delta_)
+      dq(i) = -snake_max_joint_delta_;
   }
 
   // Debug output
@@ -1158,7 +1135,6 @@ void DragonCopilot::computeAndPublishJointCommands()
   ss << "]";
   ROS_DEBUG_THROTTLE(1.0, "%s", ss.str().c_str());
 
-  // Step 4: Publish joint commands
   publishJointCommands(dq);
 }
 
@@ -1177,9 +1153,9 @@ void DragonCopilot::visualizeSnakeTrajectory()
   trajectory_line.action = visualization_msgs::Marker::ADD;
   trajectory_line.pose.orientation.w = 1.0;
   trajectory_line.scale.x = 0.02;  // Line width
-  trajectory_line.color.r = 1.0;
-  trajectory_line.color.g = 0.5;
-  trajectory_line.color.b = 0.0;  // Orange color
+  trajectory_line.color.r = 0.5;
+  trajectory_line.color.g = 0.8;
+  trajectory_line.color.b = 1.0;  // Light blue color
   trajectory_line.color.a = 0.8;
 
   for (const auto& point : trajectory_buffer_)
