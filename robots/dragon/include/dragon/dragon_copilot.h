@@ -143,9 +143,9 @@ private:
   bool hold_attitude_on_idle_;   // flag to enable attitude hold when no input (default: true)
 
   /* ===== Joint1 Control via dq ===== */
-  Eigen::Vector2d joint1_dq_;        // joint1 velocity increment [dq_pitch, dq_yaw] [rad]
-  double max_joint1_pitch_vel_;      // max angular velocity for joint1_pitch [rad/s]
-  double max_joint1_yaw_vel_;        // max angular velocity for joint1_yaw [rad/s]
+  Eigen::Vector2d joint1_dq_;    // joint1 velocity increment [dq_pitch, dq_yaw] [rad]
+  double max_joint1_pitch_vel_;  // max angular velocity for joint1_pitch [rad/s]
+  double max_joint1_yaw_vel_;    // max angular velocity for joint1_yaw [rad/s]
 
   /* ===== Robot Model Parameters (initialized once) ===== */
   int link_num_;                                         // Number of robot links (equals rotor number)
@@ -187,12 +187,12 @@ private:
   KDL::Vector root_omega_world_;  // Root angular velocity in world frame [rad/s]
 
   /* ===== Cached Eigen Conversions (from KDL types) ===== */
-  Eigen::Vector3d root_pos_world_eigen_;  // Root position in world frame (Eigen version of world_to_root_.p)
-  Eigen::Vector3d root_vel_world_eigen_;  // Root velocity in world frame (Eigen version of root_vel_world_)
+  Eigen::Vector3d root_pos_world_eigen_;        // Root position in world frame (Eigen version of world_to_root_.p)
+  Eigen::Vector3d root_vel_world_eigen_;        // Root velocity in world frame (Eigen version of root_vel_world_)
+  Eigen::Vector3d link2_head_pos_world_eigen_;  // Link2 head position in world frame (for trajectory recording)
 
   /* ===== Snake Following Parameters ===== */
   bool snake_mode_enabled_;              // Flag to enable/disable snake following visualization
-  bool snake_joint_control_enabled_;     // Flag to enable/disable snake joint control publishing
   double trajectory_sample_interval_;    // Minimum distance between trajectory samples [m]
   double trajectory_buffer_max_length_;  // Maximum arc length to store in buffer [m]
   double snake_ik_gain_;                 // Gain for IK position error correction
@@ -295,7 +295,7 @@ private:
    *
    * @param root_cmd Root frame command structure containing pitch_vel and yaw_vel
    */
-  void setJoint1DqFromJoystick(const RootFrameCommand& root_cmd);
+  void getJoint1DqFromJoystick(const RootFrameCommand& root_cmd);
 
   /**
    * @brief Compute and publish all joint commands
@@ -320,10 +320,11 @@ private:
   /* ===== Snake Following Methods ===== */
 
   /**
-   * @brief Update the trajectory history buffer with current root position
+   * @brief Update the trajectory history buffer with current link2 head position
    *
-   * Records the current root frame position to the trajectory buffer.
+   * Records the current link2 head frame position (in world coordinates) to the trajectory buffer.
    * Maintains a fixed-length buffer based on maximum arc length needed.
+   * Link2 head is used as the reference point for snake following.
    */
   void updateTrajectoryBuffer();
 
@@ -351,11 +352,17 @@ private:
   /**
    * @brief Compute target positions for each link tail based on trajectory history
    *
-   * Uses the trajectory buffer to find where each link tail should be positioned
-   * so that the robot follows the path traced by the head (like a snake).
-   * Each link tail target is constrained to be exactly link_length away from its head.
+   * Uses the trajectory buffer (which records link2 head positions) to iteratively find
+   * where each link tail should be positioned. Starting from link2 head, each link's tail
+   * target is found by searching the trajectory for a point at exactly link_length distance
+   * from its head (which is the previous link's tail target).
    *
-   * @return Vector of target positions for link2_tail, link3_tail, link4_tail in root frame
+   * This iterative approach ensures:
+   * - link2 tail target: at distance link_length from link2 head
+   * - link3 tail target: at distance link_length from link2 tail target (= link3 head)
+   * - link4 tail target: at distance link_length from link3 tail target (= link4 head)
+   *
+   * @return Vector of target positions for link2_tail, link3_tail, link4_tail in world frame
    */
   std::vector<Eigen::Vector3d> computeSnakeTargetPositions();
 

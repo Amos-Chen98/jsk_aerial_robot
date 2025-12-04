@@ -46,8 +46,7 @@ navigation:
     
     # ========== Snake Following Mode ==========
     # When enabled, link2/3/4 tails follow the trajectory traced by link1
-    snake_mode_enabled: true              # Enable snake following mode
-    snake_joint_control_enabled: false    # Enable joint control (false = visualization only)
+    snake_mode_enabled: false              # Enable snake following mode
     trajectory_sample_interval: 0.1      # Trajectory sample interval [m]
     trajectory_buffer_max_length: 3.0     # Trajectory buffer max length [m]
     snake_ik_gain: 1.0                    # IK gain (recommended: 0.3-1.0)
