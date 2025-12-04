@@ -37,10 +37,7 @@
 
 #include <dragon/dragon_navigation.h>
 #include <aerial_robot_model/model/transformable_aerial_robot_model.h>
-#include <aerial_robot_control/minco_trajectory/minco.hpp>
-#include <aerial_robot_control/minco_trajectory/trajectory.hpp>
 #include <visualization_msgs/MarkerArray.h>
-#include <nav_msgs/Odometry.h>
 #include <deque>
 #include <std_msgs/Empty.h>
 
@@ -130,87 +127,6 @@ private:
    */
   void transformAndSetControlTargets(const RootFrameCommand& root_cmd);
 
-  /**
-   * @brief Generate MINCO trajectory and compute velocity directions for link control
-   *
-   * This method:
-   * 1. Calculates 3D positions of all link heads and the last link tail using forward kinematics
-   * 2. Generates a MINCO (Minimum Control) trajectory passing through these waypoints
-   * 3. Computes velocity directions at each link head for joint control
-   * 4. Visualizes the trajectory in RViz
-   *
-   * Uses the cached joint_positions_ member variable updated by updateTransformationCache().
-   * The generated trajectory is stored in current_trajectory_ for later use in joint control.
-   *
-   * @param root_cmd Root frame command structure for debugging purposes
-   */
-  void copilotPlan(const RootFrameCommand& root_cmd);
-
-  /**
-   * @brief Compute velocity directions from the generated MINCO trajectory
-   *
-   * This method computes the velocity direction (normalized velocity vector) at each link head
-   * position along the generated trajectory. The directions are useful for determining the
-   * desired joint angles to align each link with the trajectory.
-   *
-   * The computed velocity directions are stored in the class member link_vel_directions_.
-   */
-  void computeLinkVel();
-
-  /**
-   * @brief Compute velocity directions in root frame from world frame velocity directions
-   *
-   * This method transforms the velocity directions computed by computeLinkVel() from world frame
-   * to root frame coordinates. This is useful for joint control since the robot kinematics
-   * are typically defined with respect to the root frame.
-   *
-   * The computed velocity directions in root frame are stored in link_vel_directions_root_.
-   * This method should be called after computeLinkVel().
-   */
-  void computeLinkVelRoot();
-
-  /**
-   * @brief Calculate link waypoints from current joint positions
-   *
-   * This method computes 3D positions of all link heads and the tail position of the last link
-   * using forward kinematics. The waypoints are in world frame coordinates.
-   *
-   * Uses the cached joint_positions_ member variable updated by updateTransformationCache().
-   *
-   * Waypoints include:
-   * - Link1 head, Link2 head, ..., LinkN head
-   * - Last link tail (computed as: last link head + link_length * link_x_direction)
-   *
-   * @return Vector of waypoints (link_num + 1 waypoints total)
-   */
-  std::vector<Eigen::Vector3d> calculateLinkWaypoints();
-
-  /**
-   * @brief Generate MINCO trajectory from link waypoints
-   *
-   * This method:
-   * 1. Calculates link waypoints using calculateLinkWaypoints()
-   * 2. Sets up boundary conditions (position, velocity, acceleration)
-   * 3. Generates the MINCO trajectory through all waypoints
-   *
-   * Uses the cached joint_positions_ member variable updated by updateTransformationCache().
-   * The generated trajectory is stored in current_trajectory_ member variable.
-   */
-  void generateMincoTrajectory();
-
-  /**
-   * @brief Visualize the MINCO trajectory in RViz
-   *
-   * This method publishes two visualization messages:
-   * 1. A LINE_STRIP marker showing the continuous trajectory path
-   * 2. ARROW markers showing velocity directions at each link head
-   *
-   * The trajectory is sampled at 50 Hz (dt=0.02s) to provide smooth visualization.
-   * Velocity arrows are displayed at link positions (starting from link2) to indicate
-   * the trajectory direction, with arrows pointing opposite to the velocity for visualization.
-   */
-  void visualizeTrajectory();
-
   /* ===== Copilot Control Parameters ===== */
   double max_copilot_x_vel_;      // maximum forward/backward velocity
   double max_copilot_y_vel_;      // maximum lateral velocity
@@ -222,9 +138,14 @@ private:
   /* ===== Joystick State Tracking ===== */
   bool r2_trigger_initialized_;  // true after R2 has been pressed at least once
   bool l2_trigger_initialized_;  // true after L2 has been pressed at least once
-  double root_pitch_cmd_;        // commanded root pitch angle
-  double root_yaw_cmd_;          // commanded root yaw angle
+  double root_pitch_cmd_;        // commanded root pitch angle (legacy, kept for compatibility)
+  double root_yaw_cmd_;          // commanded root yaw angle (legacy, kept for compatibility)
   bool hold_attitude_on_idle_;   // flag to enable attitude hold when no input (default: true)
+
+  /* ===== Joint1 Control via dq ===== */
+  Eigen::Vector2d joint1_dq_;        // joint1 velocity increment [dq_pitch, dq_yaw] [rad]
+  double max_joint1_pitch_vel_;      // max angular velocity for joint1_pitch [rad/s]
+  double max_joint1_yaw_vel_;        // max angular velocity for joint1_yaw [rad/s]
 
   /* ===== Robot Model Parameters (initialized once) ===== */
   int link_num_;                                         // Number of robot links (equals rotor number)
@@ -269,14 +190,6 @@ private:
   Eigen::Vector3d root_pos_world_eigen_;  // Root position in world frame (Eigen version of world_to_root_.p)
   Eigen::Vector3d root_vel_world_eigen_;  // Root velocity in world frame (Eigen version of root_vel_world_)
 
-  /* ===== MINCO Trajectory ===== */
-  minco::MINCO_S3NU minco_;           // MINCO trajectory generator for minimum jerk (s=3)
-  Trajectory<5> current_trajectory_;  // Current trajectory being executed
-  // Computed trajectory velocity directions
-  std::vector<Eigen::Vector3d> link_vel_directions_;  // Velocity directions for each link (from link2) in world frame
-  std::vector<Eigen::Vector3d> link_vel_directions_root_;  // Velocity directions for each link (from link2) in root
-                                                           // frame
-
   /* ===== Snake Following Parameters ===== */
   bool snake_mode_enabled_;              // Flag to enable/disable snake following visualization
   bool snake_joint_control_enabled_;     // Flag to enable/disable snake joint control publishing
@@ -297,8 +210,6 @@ private:
                                                                 // frame
 
   /* ===== ROS Publishers ===== */
-  ros::Publisher trajectory_viz_pub_;        // Publisher for MINCO trajectory visualization
-  ros::Publisher root_frame_odom_pub_;       // Publisher for root frame odometry
   ros::Publisher snake_trajectory_viz_pub_;  // Publisher for snake trajectory visualization
 
   /* ===== ROS Subscribers ===== */
@@ -375,82 +286,36 @@ private:
   void setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd);
 
   /**
-   * @brief Generate joint commands from link velocity directions
+   * @brief Compute joint1 dq (velocity increment) from joystick input
    *
-   * This method converts the velocity directions of each link (computed from the MINCO trajectory)
-   * into joint angle commands. Uses the class member link_vel_directions_ computed by computeLinkVel().
-   * This is a placeholder implementation that will be replaced with actual joint control logic.
+   * This method computes the dq (velocity increment) for joint1_pitch and joint1_yaw
+   * from joystick pitch_vel and yaw_vel commands. The dq values are clamped to respect
+   * joint limits. This approach maintains consistency with snake following which also
+   * outputs dq commands.
    *
-   * @param root_cmd Root frame command structure for debugging purposes
+   * @param root_cmd Root frame command structure containing pitch_vel and yaw_vel
    */
-  void generateJointCommands(const RootFrameCommand& root_cmd);
+  void setJoint1DqFromJoystick(const RootFrameCommand& root_cmd);
 
   /**
-   * @brief Build constraint matrix for joint velocity optimization
+   * @brief Compute and publish all joint commands
    *
-   * Constructs the least-squares constraint matrix A and target vector b to enforce
-   * that each link tail moves in the desired direction from the MINCO trajectory.
-   * Uses cached R_world_to_root_ and v_root_world_ member variables.
-   *
-   * @param A Output constraint matrix (2*(N-1) x link_joint_num_)
-   * @param b Output target vector (2*(N-1) x 1)
+   * Unified method that:
+   * 1. Computes snake IK dq if snake_mode_enabled_ (for joint2 onwards)
+   * 2. Merges joint1 dq from joystick
+   * 3. Publishes all joint commands
    */
-  void buildConstraintMatrix(Eigen::MatrixXd& A, Eigen::VectorXd& b);
-
-  /**
-   * @brief Solve least-squares problem for joint velocities
-   *
-   * Solves the optimization problem: minimize ||A * dq - b||^2
-   * using complete orthogonal decomposition for robustness.
-   *
-   * @param A Constraint matrix
-   * @param b Target vector
-   * @return dq Joint velocity solution
-   */
-  Eigen::VectorXd solveJointVelocities(const Eigen::MatrixXd& A, const Eigen::VectorXd& b);
-
-  /**
-   * @brief Print debug information about constraint matrix
-   *
-   * Outputs matrix rank, singular values, and per-joint influence to help
-   * diagnose optimization problems.
-   *
-   * @param A Constraint matrix
-   * @param dq Computed joint velocities
-   */
-  void debugPrintMatrixInfo(const Eigen::MatrixXd& A, const Eigen::VectorXd& dq);
-
-  /**
-   * @brief Print debug information about velocities and residuals
-   *
-   * Outputs root velocity commands, MINCO trajectory directions, actual link velocities,
-   * and optimization residuals for debugging.
-   * Uses cached R_world_to_root_ and v_root_world_ member variables.
-   *
-   * @param dq Computed joint velocities
-   * @param A Constraint matrix
-   * @param b Target vector
-   */
-  void debugPrintVelocityInfo(const Eigen::VectorXd& dq, const Eigen::MatrixXd& A, const Eigen::VectorXd& b);
+  void computeAndPublishJointCommands();
 
   /**
    * @brief Publish joint position commands
    *
-   * Computes target joint positions from current positions and velocities,
+   * Computes target joint positions from current positions and dq,
    * then publishes the joint control message.
    *
-   * @param dq Joint velocity increments
+   * @param dq Joint velocity increments for all joints
    */
   void publishJointCommands(const Eigen::VectorXd& dq);
-
-  /**
-   * @brief Publish root frame odometry (position and velocity in world frame)
-   *
-   * This method publishes the root frame's position and velocity in world coordinates
-   * as a nav_msgs/Odometry message. The position is obtained from the cached world_to_root_
-   * transformation. The velocity uses the cached root_vel_world_ and root_omega_world_.
-   */
-  void publishRootFrameOdom();
 
   /* ===== Snake Following Methods ===== */
 
@@ -504,14 +369,6 @@ private:
    * @return Joint angle commands
    */
   Eigen::VectorXd computeSnakeJointCommands(const std::vector<Eigen::Vector3d>& target_positions);
-
-  /**
-   * @brief Execute snake-following control
-   *
-   * Main method that combines trajectory buffer update, target computation,
-   * and joint command generation for snake-like following behavior.
-   */
-  void executeSnakeFollowing();
 
   /**
    * @brief Visualize the trajectory buffer and target positions in RViz

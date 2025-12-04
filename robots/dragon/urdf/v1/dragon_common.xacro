@@ -8,8 +8,9 @@
   <!--  model type 4: end -->
 
   <!-- general attribute -->
-  <!-- baselink is set to link1 (head link), while fc (flight controller) remains on link2 -->
-  <baselink name="link1" />
+  <!-- baselink is set to fc (on link2), so attitude controller stabilizes the body (link2 onwards) -->
+  <!-- This allows link1 (head) to rotate freely via joint1 while body stays stable -->
+  <baselink name="fc" />
   <thrust_link name="thrust" />
 
   <!-- kinematics [m] -->
