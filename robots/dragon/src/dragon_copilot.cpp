@@ -28,6 +28,9 @@ DragonCopilot::DragonCopilot()
   , snake_max_joint_delta_(0.1)         // Max 0.1 rad per iteration
   , total_arc_length_(0.0)
   , trajectory_initialized_(false)
+  , cached_joint1_yaw_dq_(0.0)  // Cached joint1_yaw delta for yaw rate control
+  , baselink_yaw_world_init_(0.0)
+  , baselink_yaw_world_init_recorded_(false)
 {
 }
 
@@ -368,9 +371,9 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& root_c
   cacheRootFrameVelocities(root_cmd);
 
   getJoint1DqFromJoystick(root_cmd);
-  setCoGVelocityTargets(root_cmd);
   computeAndPublishJointCommands();
-  setBaselinkAttitudeTarget(root_cmd);
+  setCoGVelocityTargets(root_cmd);
+  //   setBaselinkAttitudeTarget(root_cmd);
 }
 
 void DragonCopilot::cacheFrameTransforms()
@@ -386,22 +389,32 @@ void DragonCopilot::cacheFrameTransforms()
                                          estimator_->getPos(Frame::COG, estimate_mode_))),
                   world_to_cog_);
 
-  // Get baselink frame in world coordinates
+  // Get baselink frame in world coordinates (local variable, only used to compute world_to_root_)
+  KDL::Frame world_to_baselink;
   tf::poseTFToKDL(tf::Pose(tf::Transform(estimator_->getOrientation(Frame::BASELINK, estimate_mode_),
                                          estimator_->getPos(Frame::BASELINK, estimate_mode_))),
-                  world_to_baselink_);
+                  world_to_baselink);
+
+  // Cache baselink yaw in world frame (directly from estimator)
+  baselink_yaw_world_ = estimator_->getEuler(Frame::BASELINK, estimate_mode_).z();
+
+  // Record initial baselink yaw on first execution
+  if (!baselink_yaw_world_init_recorded_)
+  {
+    baselink_yaw_world_init_ = baselink_yaw_world_;
+    baselink_yaw_world_init_recorded_ = true;
+    ROS_INFO("[DragonCopilot] Initial baselink yaw recorded: %.3f rad", baselink_yaw_world_init_);
+  }
 
   const auto& seg_tf_map = robot_model_->getSegmentsTf();
 
-  // Get root to baselink transform from pre-computed segments tf
-  // Use getBaselinkName() to dynamically get the baselink frame name from URDF configuration
   root_to_baselink_ = seg_tf_map.at(robot_model_->getBaselinkName());
 
   // Calculate inverse transform
   baselink_to_root_ = root_to_baselink_.Inverse();
 
   // Calculate world to root transform
-  world_to_root_ = world_to_baselink_ * baselink_to_root_;
+  world_to_root_ = world_to_baselink * baselink_to_root_;
 
   // Cache rotation matrix for other computations (e.g., Jacobian transformation)
   KDL::Rotation world_to_root_rotation = world_to_root_.M;
@@ -575,109 +588,69 @@ void DragonCopilot::cacheRootFrameVelocities(const RootFrameCommand& root_cmd)
   root_omega_world_ = KDL::Vector::Zero();
 }
 
-void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
-{
-  // Use cached root frame velocities (computed in cacheRootFrameVelocities)
-  // root_vel_world_ and root_omega_world_ are already available
-  // Note: root_vel_world_ already includes the z velocity component
-
-  // Calculate position offset from root to CoG in world frame
-  KDL::Vector root_to_cog_offset_world = world_to_cog_.p - world_to_root_.p;
-
-  // Velocity contribution from rotation: omega x r
-  KDL::Vector vel_from_rotation = root_omega_world_ * root_to_cog_offset_world;
-
-  // Final CoG velocity: v_cog = v_root + omega x (r_cog - r_root)
-  KDL::Vector des_cog_vel_world = root_vel_world_ + vel_from_rotation;
-
-  // Set velocity targets
-  setTargetVelX(des_cog_vel_world.x());
-  setTargetVelY(des_cog_vel_world.y());
-  setTargetVelZ(des_cog_vel_world.z());  // z velocity already included in root_vel_world_
-
-  // Set yaw velocity
-  setTargetOmegaZ(root_omega_world_.z());
-}
-
-void DragonCopilot::setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd)
-{
-  double des_baselink_r = 0.0;
-  double des_baselink_p = 0.0;  // Keep level - don't follow joint1_pitch
-
-  // Get current target for smooth transition
-  double curr_baselink_r, curr_baselink_p, curr_baselink_y;
-  tf::Matrix3x3(curr_target_baselink_rot_).getRPY(curr_baselink_r, curr_baselink_p, curr_baselink_y);
-
-  // Apply smooth pitch change limit
-  double pitch_diff = des_baselink_p - curr_baselink_p;
-  if (fabs(pitch_diff) > baselink_rot_change_thresh_)
-  {
-    curr_baselink_p += pitch_diff / fabs(pitch_diff) * baselink_rot_change_thresh_;
-  }
-  else
-  {
-    curr_baselink_p = des_baselink_p;
-  }
-
-  // Apply smooth roll change limit
-  double roll_diff = des_baselink_r - curr_baselink_r;
-  if (fabs(roll_diff) > baselink_rot_change_thresh_)
-  {
-    curr_baselink_r += roll_diff / fabs(roll_diff) * baselink_rot_change_thresh_;
-  }
-  else
-  {
-    curr_baselink_r = des_baselink_r;
-  }
-
-  // Update final target baselink rotation
-  // yaw=0 means yaw is controlled via omega_z rate command
-  final_target_baselink_rot_.setRPY(curr_baselink_r, curr_baselink_p, 0);
-}
-
 void DragonCopilot::getJoint1DqFromJoystick(const RootFrameCommand& root_cmd)
 {
   joint1_dq_(0) = root_cmd.pitch_vel * loop_du_;
   joint1_dq_(1) = root_cmd.yaw_vel * loop_du_;
 
-  ROS_DEBUG_THROTTLE(1.0, "[DragonCopilot] Joint1 dq: pitch=%.4f rad, yaw=%.4f rad", joint1_dq_(0), joint1_dq_(1));
+  //   ROS_INFO("[DragonCopilot] Joint1 dq: pitch=%.4f rad, yaw=%.4f rad", joint1_dq_(0), joint1_dq_(1));
 }
 
-void DragonCopilot::publishJointCommands(const Eigen::VectorXd& dq)
+void DragonCopilot::computeAndPublishJointCommands()
 {
-  // Compute target joint positions: target = current + dq
-  // Note: dq already includes joint1 dq from joystick (merged before calling this function)
-  Eigen::VectorXd current_link_joint_positions(link_joint_num_);
-  for (int i = 0; i < link_joint_num_; i++)
+  // Initialize dq to zero for all joints
+  Eigen::VectorXd dq = Eigen::VectorXd::Zero(link_joint_num_);
+  // Update trajectory buffer with current link2 head position
+  updateTrajectoryBuffer();
+
+  // Check if trajectory buffer has sufficient arc length
+  // For N links, we need to find points at distances 1, 2, ..., (N-1) link lengths from link2 head
+  // So minimum required arc length is (N-1) * link_length
+  double min_required_arc_length = (link_num_ - 1) * link_length_;
+  bool trajectory_ready = (total_arc_length_ >= min_required_arc_length);
+
+  if (trajectory_ready)
   {
-    int joint_idx = link_joint_indices_[i];
-    current_link_joint_positions(i) = joint_positions_(joint_idx);
+    snake_current_positions_world_ = getCurrentLinkTailPositionsWorld();
+    snake_target_positions_world_ = computeSnakeTargetPositions();
+  }
+  else
+  {
+    ROS_INFO_THROTTLE(1.0, "[DragonCopilot] Waiting for trajectory buffer: %.2f / %.2f m (%.1f%%)", total_arc_length_,
+                      min_required_arc_length, 100.0 * total_arc_length_ / min_required_arc_length);
   }
 
-  Eigen::VectorXd target_link_joint_positions = current_link_joint_positions + dq;
+  // Visualize trajectory
+  visualizeSnakeTrajectory();
 
-  // Clamp joint positions to joint limits (from URDF)
-  for (int i = 0; i < link_joint_num_; i++)
+  if (snake_mode_enabled_ && trajectory_ready)
   {
-    target_link_joint_positions(i) =
-        std::clamp(target_link_joint_positions(i), link_joint_lower_limits_[i], link_joint_upper_limits_[i]);
+    // Compute snake IK dq (only affects joint2 onwards in practice)
+    dq = computeSnakeJointCommands(snake_target_positions_world_);
+    // Cache joint1_yaw_dq for yaw rate control (used in setCoGVelocityTargets)
+    cached_joint1_yaw_dq_ = dq(1);
   }
 
-  // Publish joint command message
-  sensor_msgs::JointState joint_control_msg;
-  joint_control_msg.position.resize(link_joint_num_);
+  dq(0) += joint1_dq_(0);
+  dq(1) += joint1_dq_(1);
+
+  // Clamp joint deltas to maximum allowed change
+  dq = clampJointDeltas(dq);
+
+  // Debug output
+  std::stringstream ss;
+  ss << "[DragonCopilot] dq = [";
   for (int i = 0; i < link_joint_num_; i++)
   {
-    joint_control_msg.position[i] = target_link_joint_positions(i);
+    ss << std::fixed << std::setprecision(4) << dq(i);
+    if (i < link_joint_num_ - 1)
+      ss << ", ";
   }
+  ss << "]";
+  //   ROS_INFO("%s", ss.str().c_str());
 
-  joint_control_pub_.publish(joint_control_msg);
-
-  ROS_DEBUG_THROTTLE(1.0, "[DragonCopilot] Published joint commands: dq_norm=%.4f, j1_dq=[%.4f, %.4f]", dq.norm(),
-                     dq(0), dq(1));
+  publishJointCommands(dq);
 }
-
-/* ===== Snake Following Implementation ===== */
 
 void DragonCopilot::resetTrajectoryBufferCallback(const std_msgs::EmptyConstPtr& msg)
 {
@@ -802,6 +775,72 @@ std::vector<Eigen::Vector3d> DragonCopilot::getCurrentLinkTailPositionsWorld()
   }
 
   return tail_positions_world;
+}
+
+std::vector<Eigen::Vector3d> DragonCopilot::computeSnakeTargetPositions()
+{
+  std::vector<Eigen::Vector3d> target_positions;
+  target_positions.reserve(link_num_ - 1);  // For link2_tail, link3_tail, link4_tail (N-1 tails)
+
+  if (trajectory_buffer_.size() < 2)
+  {
+    return target_positions;
+  }
+
+  // Use PREDICTED link2 head position after dt to align with root_cmd timing
+  // dt is the actual control loop period from the system
+  double dt = loop_du_;
+
+  // Predicted root orientation using full angular velocity (expressed in world frame)
+  double omega_norm = root_omega_world_.Norm();
+  KDL::Rotation delta_rot = KDL::Rotation::Identity();
+  if (omega_norm > 1e-6)
+  {
+    KDL::Vector axis = root_omega_world_ / omega_norm;
+    delta_rot = KDL::Rotation::Rot(axis, omega_norm * dt);
+  }
+  // exp([omega] dt) * R_current (left-multiply because omega is in world frame)
+  KDL::Rotation predicted_root_rot = delta_rot * world_to_root_.M;
+
+  // Predicted root position in world frame: p_root_predicted = p_root_current + v_root * dt
+  Eigen::Vector3d root_pos_predicted = root_pos_world_eigen_ + root_vel_world_eigen_ * dt;
+
+  // Create predicted world_to_root transform
+  KDL::Frame world_to_root_predicted;
+  world_to_root_predicted.p = KDL::Vector(root_pos_predicted.x(), root_pos_predicted.y(), root_pos_predicted.z());
+  world_to_root_predicted.M = predicted_root_rot;
+
+  // Compute predicted link2 head position in world frame
+  // link_frames_[1] is link2's frame in root coordinates
+  KDL::Frame link2_head_frame_world = world_to_root_predicted * link_frames_[1];
+  Eigen::Vector3d link2_head_predicted(link2_head_frame_world.p.x(), link2_head_frame_world.p.y(),
+                                       link2_head_frame_world.p.z());
+
+  // Iteratively find target positions for each link tail along the trajectory
+  // The trajectory records link2 head history. For each link, we search from its HEAD
+  // (which is the previous link's tail target) to find a point at exactly link_length distance.
+  // This iterative approach ensures:
+  // - link2 tail target: at distance link_length from link2 head (predicted)
+  // - link3 tail target: at distance link_length from link2 tail target (= link3 head)
+  // - link4 tail target: at distance link_length from link3 tail target (= link4 head)
+  // Each target lies precisely on the trajectory with correct distance constraint.
+
+  // Start from predicted link2 head position
+  Eigen::Vector3d current_head = link2_head_predicted;
+
+  for (int i = 1; i < link_num_; i++)  // i = 1, 2, 3 for 4-link robot (link2, link3, link4)
+  {
+    // Find target tail position on trajectory at exactly link_length from current head
+    Eigen::Vector3d target_tail_world = findPointOnTrajectoryAtDistance(current_head, link_length_);
+
+    // Store target in WORLD frame (we'll use world frame Jacobian for IK)
+    target_positions.push_back(target_tail_world);
+
+    // For next iteration: the next link's head = current link's tail target
+    current_head = target_tail_world;
+  }
+
+  return target_positions;
 }
 
 Eigen::Vector3d DragonCopilot::findPointOnTrajectoryAtDistance(const Eigen::Vector3d& from_point,
@@ -939,203 +978,298 @@ Eigen::Vector3d DragonCopilot::findPointOnTrajectoryAtDistance(const Eigen::Vect
   return best_point;
 }
 
-std::vector<Eigen::Vector3d> DragonCopilot::computeSnakeTargetPositions()
-{
-  std::vector<Eigen::Vector3d> target_positions;
-  target_positions.reserve(link_num_ - 1);  // For link2_tail, link3_tail, link4_tail (N-1 tails)
-
-  if (trajectory_buffer_.size() < 2)
-  {
-    return target_positions;
-  }
-
-  // Use PREDICTED link2 head position after dt to align with root_cmd timing
-  // dt is the actual control loop period from the system
-  double dt = loop_du_;
-
-  // Predicted root orientation using full angular velocity (expressed in world frame)
-  double omega_norm = root_omega_world_.Norm();
-  KDL::Rotation delta_rot = KDL::Rotation::Identity();
-  if (omega_norm > 1e-6)
-  {
-    KDL::Vector axis = root_omega_world_ / omega_norm;
-    delta_rot = KDL::Rotation::Rot(axis, omega_norm * dt);
-  }
-  // exp([omega] dt) * R_current (left-multiply because omega is in world frame)
-  KDL::Rotation predicted_root_rot = delta_rot * world_to_root_.M;
-
-  // Predicted root position in world frame: p_root_predicted = p_root_current + v_root * dt
-  Eigen::Vector3d root_pos_predicted = root_pos_world_eigen_ + root_vel_world_eigen_ * dt;
-
-  // Create predicted world_to_root transform
-  KDL::Frame world_to_root_predicted;
-  world_to_root_predicted.p = KDL::Vector(root_pos_predicted.x(), root_pos_predicted.y(), root_pos_predicted.z());
-  world_to_root_predicted.M = predicted_root_rot;
-
-  // Compute predicted link2 head position in world frame
-  // link_frames_[1] is link2's frame in root coordinates
-  KDL::Frame link2_head_frame_world = world_to_root_predicted * link_frames_[1];
-  Eigen::Vector3d link2_head_predicted(link2_head_frame_world.p.x(), link2_head_frame_world.p.y(),
-                                       link2_head_frame_world.p.z());
-
-  // Iteratively find target positions for each link tail along the trajectory
-  // The trajectory records link2 head history. For each link, we search from its HEAD
-  // (which is the previous link's tail target) to find a point at exactly link_length distance.
-  // This iterative approach ensures:
-  // - link2 tail target: at distance link_length from link2 head (predicted)
-  // - link3 tail target: at distance link_length from link2 tail target (= link3 head)
-  // - link4 tail target: at distance link_length from link3 tail target (= link4 head)
-  // Each target lies precisely on the trajectory with correct distance constraint.
-
-  // Start from predicted link2 head position
-  Eigen::Vector3d current_head = link2_head_predicted;
-
-  for (int i = 1; i < link_num_; i++)  // i = 1, 2, 3 for 4-link robot (link2, link3, link4)
-  {
-    // Find target tail position on trajectory at exactly link_length from current head
-    Eigen::Vector3d target_tail_world = findPointOnTrajectoryAtDistance(current_head, link_length_);
-
-    // Store target in WORLD frame (we'll use world frame Jacobian for IK)
-    target_positions.push_back(target_tail_world);
-
-    // For next iteration: the next link's head = current link's tail target
-    current_head = target_tail_world;
-  }
-
-  return target_positions;
-}
-
 Eigen::VectorXd DragonCopilot::computeSnakeJointCommands(const std::vector<Eigen::Vector3d>& target_positions_world)
 {
-  // Initialize joint delta to zero
+  // Simple position feedback control without Jacobian
+  // Compute dq for each joint pair (pitch, yaw) sequentially from link2 to linkN
   Eigen::VectorXd dq = Eigen::VectorXd::Zero(link_joint_num_);
 
-  if (target_positions_world.empty() || link_jacobians_linear_.empty())
+  if (target_positions_world.empty() || snake_current_positions_world_.empty())
   {
     return dq;
   }
 
-  // Use cached current link tail positions in WORLD frame
-  const std::vector<Eigen::Vector3d>& current_positions_world = snake_current_positions_world_;
+  // For each link (starting from link2), compute joint deltas based on position error
+  // Each link has 2 joints: pitch (even index) and yaw (odd index)
+  // link2: joints 0,1; link3: joints 2,3; link4: joints 4,5; etc.
 
-  // Build constraint matrix for least-squares IK in WORLD frame
-  // Total link tail velocity in world: v_total = root_vel_world + R_world_to_root * J_root * dq = root_vel_world +
-  // J_world * dq
-  //
-  // We want: pos_current + v_total * dt = pos_target
-  // => J_world * dq = (pos_target - pos_current) / dt - root_vel_world
-  //
-  // For position control with gain: J_world * dq = gain * (pos_target - pos_current) / dt - root_vel_world
-
-  double dt = loop_du_;  // Use actual control loop period
-  // Use cached Eigen version of root velocity
-  const Eigen::Vector3d& root_vel = root_vel_world_eigen_;
-
-  int num_constraints = 3 * (link_num_ - 1);  // 3 DOF per tail (x, y, z)
-  Eigen::MatrixXd A = Eigen::MatrixXd::Zero(num_constraints, link_joint_num_);
-  Eigen::VectorXd b = Eigen::VectorXd::Zero(num_constraints);
-
-  for (int i = 0; i < link_num_ - 1; i++)  // i = 0, 1, 2 for link2, link3, link4 tails
+  for (int i = 0; i < link_num_ - 1; i++)  // i = 0, 1, 2 for link2, link3, link4
   {
-    // Position error in world frame
-    // target_positions_world[i] is target for link(i+2) tail in world frame
-    // current_positions_world[i] is current position of link(i+2) tail in world frame (now aligned)
-    Eigen::Vector3d pos_error = target_positions_world[i] - current_positions_world[i];
+    // Get position error in world frame
+    Eigen::Vector3d pos_error = target_positions_world[i] - snake_current_positions_world_[i];
 
-    // Desired velocity to correct the error (scaled by gain) minus root motion contribution
-    // This ensures that joint motion compensates for the difference between
-    // desired link motion and root frame motion (translation + rotation)
-    Eigen::Vector3d omega_world(root_omega_world_.x(), root_omega_world_.y(), root_omega_world_.z());
-    Eigen::Vector3d relative_pos = current_positions_world[i] - root_pos_world_eigen_;
-    Eigen::Vector3d root_motion = root_vel + omega_world.cross(relative_pos);
-    Eigen::Vector3d desired_joint_vel_contribution = snake_ik_gain_ * pos_error / dt - root_motion;
+    // Transform error to root frame for joint control
+    // R_world_to_root_.transpose() = R_root_to_world, so we need inverse
+    Eigen::Matrix3d R_root_to_world = R_world_to_root_;
+    Eigen::Matrix3d R_world_to_root = R_root_to_world.transpose();
+    Eigen::Vector3d pos_error_root = R_world_to_root * pos_error;
 
-    // Get Jacobian for this link tail and transform to world frame
-    // i=0: link2_tail = link3_head, use link_jacobians_linear_[2]
-    // i=1: link3_tail = link4_head, use link_jacobians_linear_[3]
-    // i=N-2: linkN_tail, use link_jacobians_linear_[link_num_]
-    int jac_idx = (i < link_num_ - 2) ? (i + 2) : link_num_;
-    if (jac_idx < static_cast<int>(link_jacobians_linear_.size()))
+    // Further transform to the local frame of the link's head joint
+    // For link(i+2), its head is at link_frames_[i+1]
+    // The joint axes are: pitch rotates around local y-axis, yaw rotates around local z-axis
+    int link_idx = i + 1;  // link_frames_ index (0-based, so link2 is index 1)
+    if (link_idx >= static_cast<int>(link_frames_.size()))
     {
-      const Eigen::MatrixXd& J_root = link_jacobians_linear_[jac_idx];
-      Eigen::MatrixXd J_world = R_world_to_root_ * J_root;  // Transform to world frame
-
-      // Fill in constraint matrix: J_world * dq = desired_joint_vel_contribution * dt
-      A.block(3 * i, 0, 3, link_joint_num_) = J_world;
-      b.segment(3 * i, 3) = desired_joint_vel_contribution * dt;
+      continue;
     }
+
+    // Get the link frame rotation matrix
+    KDL::Rotation link_rot = link_frames_[link_idx].M;
+    Eigen::Matrix3d R_link;
+    for (int r = 0; r < 3; r++)
+    {
+      for (int c = 0; c < 3; c++)
+      {
+        R_link(r, c) = link_rot(r, c);
+      }
+    }
+
+    // Transform error to link local frame
+    Eigen::Vector3d pos_error_local = R_link.transpose() * pos_error_root;
+
+    int pitch_joint_idx = 2 * i;
+    int yaw_joint_idx = 2 * i + 1;
+
+    if (pitch_joint_idx >= link_joint_num_ || yaw_joint_idx >= link_joint_num_)
+    {
+      continue;
+    }
+
+    // Simple proportional control:
+    // - Positive z error in local frame -> need negative pitch
+    // - Positive y error in local frame -> need negative yaw
+    // The gain snake_ik_gain_ controls the response speed
+
+    double dt = loop_du_;
+    double pitch_dq = -snake_ik_gain_ * pos_error_local.z() * dt;
+    double yaw_dq = snake_ik_gain_ * pos_error_local.y() * dt;
+
+    dq(pitch_joint_idx) = pitch_dq;
+    dq(yaw_joint_idx) = yaw_dq;
   }
 
-  // Solve least-squares problem with damping for stability
-  double damping = 0.01;
-  Eigen::MatrixXd AtA = A.transpose() * A + damping * Eigen::MatrixXd::Identity(link_joint_num_, link_joint_num_);
-  Eigen::VectorXd Atb = A.transpose() * b;
-  dq = AtA.ldlt().solve(Atb);
-
-  //   // DEBUG: Override dq with fixed values for testing
-  //   dq << 0.0, 0.0, 0.0, 0.0, 0.0, -1.0;
+  // Clamp joint deltas
+  dq = clampJointDeltas(dq);
 
   return dq;
 }
 
-void DragonCopilot::computeAndPublishJointCommands()
+// Eigen::VectorXd DragonCopilot::computeSnakeJointCommands(const std::vector<Eigen::Vector3d>& target_positions_world)
+// {
+//   // Initialize joint delta to zero
+//   Eigen::VectorXd dq = Eigen::VectorXd::Zero(link_joint_num_);
+
+//   if (target_positions_world.empty() || link_jacobians_linear_.empty())
+//   {
+//     return dq;
+//   }
+
+//   // Use cached current link tail positions in WORLD frame
+//   const std::vector<Eigen::Vector3d>& current_positions_world = snake_current_positions_world_;
+
+//   // Build constraint matrix for least-squares IK in WORLD frame
+//   // Total link tail velocity in world: v_total = root_vel_world + R_world_to_root * J_root * dq = root_vel_world +
+//   // J_world * dq
+//   //
+//   // We want: pos_current + v_total * dt = pos_target
+//   // => J_world * dq = (pos_target - pos_current) / dt - root_vel_world
+//   //
+//   // For position control with gain: J_world * dq = gain * (pos_target - pos_current) / dt - root_vel_world
+
+//   double dt = loop_du_;  // Use actual control loop period
+//   // Use cached Eigen version of root velocity
+//   const Eigen::Vector3d& root_vel = root_vel_world_eigen_;
+
+//   int num_constraints = 3 * (link_num_ - 1);  // 3 DOF per tail (x, y, z)
+//   Eigen::MatrixXd A = Eigen::MatrixXd::Zero(num_constraints, link_joint_num_);
+//   Eigen::VectorXd b = Eigen::VectorXd::Zero(num_constraints);
+
+//   for (int i = 0; i < link_num_ - 1; i++)  // i = 0, 1, 2 for link2, link3, link4 tails
+//   {
+//     // Position error in world frame
+//     // target_positions_world[i] is target for link(i+2) tail in world frame
+//     // current_positions_world[i] is current position of link(i+2) tail in world frame (now aligned)
+//     Eigen::Vector3d pos_error = target_positions_world[i] - current_positions_world[i];
+
+//     // Desired velocity to correct the error (scaled by gain) minus root motion contribution
+//     // This ensures that joint motion compensates for the difference between
+//     // desired link motion and root frame motion (translation + rotation)
+//     Eigen::Vector3d omega_world(root_omega_world_.x(), root_omega_world_.y(), root_omega_world_.z());
+//     Eigen::Vector3d relative_pos = current_positions_world[i] - root_pos_world_eigen_;
+//     Eigen::Vector3d root_motion = root_vel + omega_world.cross(relative_pos);
+//     Eigen::Vector3d desired_joint_vel_contribution = snake_ik_gain_ * pos_error / dt - root_motion;
+
+//     // Get Jacobian for this link tail and transform to world frame
+//     // i=0: link2_tail = link3_head, use link_jacobians_linear_[2]
+//     // i=1: link3_tail = link4_head, use link_jacobians_linear_[3]
+//     // i=N-2: linkN_tail, use link_jacobians_linear_[link_num_]
+//     int jac_idx = (i < link_num_ - 2) ? (i + 2) : link_num_;
+//     if (jac_idx < static_cast<int>(link_jacobians_linear_.size()))
+//     {
+//       const Eigen::MatrixXd& J_root = link_jacobians_linear_[jac_idx];
+//       Eigen::MatrixXd J_world = R_world_to_root_ * J_root;  // Transform to world frame
+
+//       // Fill in constraint matrix: J_world * dq = desired_joint_vel_contribution * dt
+//       A.block(3 * i, 0, 3, link_joint_num_) = J_world;
+//       b.segment(3 * i, 3) = desired_joint_vel_contribution * dt;
+//     }
+//   }
+
+//   // Solve least-squares problem with damping for stability
+//   double damping = 0.01;
+//   Eigen::MatrixXd AtA = A.transpose() * A + damping * Eigen::MatrixXd::Identity(link_joint_num_, link_joint_num_);
+//   Eigen::VectorXd Atb = A.transpose() * b;
+//   dq = AtA.ldlt().solve(Atb);
+
+//   //   // DEBUG: Override dq with fixed values for testing
+//   //   dq << 0.0, 0.0, 0.0, 0.0, 0.0, -1.0;
+
+//   dq = clampJointDeltas(dq);
+
+//   return dq;
+// }
+
+void DragonCopilot::publishJointCommands(const Eigen::VectorXd& dq)
 {
-  // Initialize dq to zero for all joints
-  Eigen::VectorXd dq = Eigen::VectorXd::Zero(link_joint_num_);
-  // Update trajectory buffer with current link2 head position
-  updateTrajectoryBuffer();
-
-  // Check if trajectory buffer has sufficient arc length
-  // For N links, we need to find points at distances 1, 2, ..., (N-1) link lengths from link2 head
-  // So minimum required arc length is (N-1) * link_length
-  double min_required_arc_length = (link_num_ - 1) * link_length_;
-  bool trajectory_ready = (total_arc_length_ >= min_required_arc_length);
-
-  if (trajectory_ready)
-  {
-    snake_current_positions_world_ = getCurrentLinkTailPositionsWorld();
-    snake_target_positions_world_ = computeSnakeTargetPositions();
-  }
-  else
-  {
-    ROS_INFO_THROTTLE(1.0, "[DragonCopilot] Waiting for trajectory buffer: %.2f / %.2f m (%.1f%%)", total_arc_length_,
-                      min_required_arc_length, 100.0 * total_arc_length_ / min_required_arc_length);
-  }
-
-  // Visualize trajectory
-  visualizeSnakeTrajectory();
-
-  if (snake_mode_enabled_ && trajectory_ready)
-  {
-    // Compute snake IK dq (only affects joint2 onwards in practice)
-    dq = computeSnakeJointCommands(snake_target_positions_world_);
-  }
-
-  dq(0) += joint1_dq_(0);
-  dq(1) += joint1_dq_(1);
-
-  //   Clamp joint deltas to maximum allowed change
+  // Compute target joint positions: target = current + dq
+  // Note: dq already includes joint1 dq from joystick (merged before calling this function)
+  Eigen::VectorXd current_link_joint_positions(link_joint_num_);
   for (int i = 0; i < link_joint_num_; i++)
   {
-    if (dq(i) > snake_max_joint_delta_)
-      dq(i) = snake_max_joint_delta_;
-    else if (dq(i) < -snake_max_joint_delta_)
-      dq(i) = -snake_max_joint_delta_;
+    int joint_idx = link_joint_indices_[i];
+    current_link_joint_positions(i) = joint_positions_(joint_idx);
   }
 
-  // Debug output
+  Eigen::VectorXd target_link_joint_positions = current_link_joint_positions + dq;
+
+  // Clamp joint positions to joint limits (from URDF)
+  for (int i = 0; i < link_joint_num_; i++)
+  {
+    target_link_joint_positions(i) =
+        std::clamp(target_link_joint_positions(i), link_joint_lower_limits_[i], link_joint_upper_limits_[i]);
+  }
+
+  // Publish joint command message
+  sensor_msgs::JointState joint_control_msg;
+  joint_control_msg.position.resize(link_joint_num_);
+  for (int i = 0; i < link_joint_num_; i++)
+  {
+    joint_control_msg.position[i] = target_link_joint_positions(i);
+  }
+
+  joint_control_pub_.publish(joint_control_msg);
+
+  // Output all joint commands
   std::stringstream ss;
-  ss << "[DragonCopilot] dq = [";
+  ss << "[DragonCopilot] Published joint commands: dq_norm=" << std::fixed << std::setprecision(4) << dq.norm()
+     << ", dq=[";
   for (int i = 0; i < link_joint_num_; i++)
   {
     ss << std::fixed << std::setprecision(4) << dq(i);
     if (i < link_joint_num_ - 1)
       ss << ", ";
   }
+  ss << "], target=[";
+  for (int i = 0; i < link_joint_num_; i++)
+  {
+    ss << std::fixed << std::setprecision(4) << target_link_joint_positions(i);
+    if (i < link_joint_num_ - 1)
+      ss << ", ";
+  }
   ss << "]";
-  ROS_DEBUG_THROTTLE(1.0, "%s", ss.str().c_str());
+  ROS_INFO("%s", ss.str().c_str());
+}
 
-  publishJointCommands(dq);
+Eigen::VectorXd DragonCopilot::clampJointDeltas(const Eigen::VectorXd& dq)
+{
+  Eigen::VectorXd clamped_dq = dq;
+  for (int i = 0; i < link_joint_num_; i++)
+  {
+    if (clamped_dq(i) > snake_max_joint_delta_)
+      clamped_dq(i) = snake_max_joint_delta_;
+    else if (clamped_dq(i) < -snake_max_joint_delta_)
+      clamped_dq(i) = -snake_max_joint_delta_;
+  }
+  return clamped_dq;
+}
+
+void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
+{
+  // Use cached root frame velocities (computed in cacheRootFrameVelocities)
+  // root_vel_world_ and root_omega_world_ are already available
+  // Note: root_vel_world_ already includes the z velocity component
+
+  // Calculate position offset from root to CoG in world frame
+  KDL::Vector root_to_cog_offset_world = world_to_cog_.p - world_to_root_.p;
+
+  // Velocity contribution from rotation: omega x r
+  KDL::Vector vel_from_rotation = root_omega_world_ * root_to_cog_offset_world;
+
+  // Final CoG velocity: v_cog = v_root + omega x (r_cog - r_root)
+  KDL::Vector des_cog_vel_world = root_vel_world_ + vel_from_rotation;
+
+  // Set velocity targets
+  setTargetVelX(des_cog_vel_world.x());
+  setTargetVelY(des_cog_vel_world.y());
+  setTargetVelZ(des_cog_vel_world.z());  // z velocity already included in root_vel_world_
+}
+
+void DragonCopilot::setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd)
+{
+  double des_baselink_r = 0.0;
+  double des_baselink_p = 0.0;  // Keep level - don't follow joint1_pitch
+  double des_baselink_y = baselink_yaw_world_init_;
+  if (snake_mode_enabled_)
+  {
+    des_baselink_y += cached_joint1_yaw_dq_;
+    // output the current cached_joint1_yaw_dq_ for debugging
+    ROS_INFO("[DragonCopilot] Cached joint1 yaw dq for baselink yaw target: %.4f rad", cached_joint1_yaw_dq_);
+  }
+
+  // Get current target for smooth transition
+  double curr_baselink_r, curr_baselink_p, curr_baselink_y;
+  tf::Matrix3x3(curr_target_baselink_rot_).getRPY(curr_baselink_r, curr_baselink_p, curr_baselink_y);
+
+  // output current roll, pitch, yaw for debugging
+  //   ROS_INFO("[DragonCopilot] Baselink target RPY: roll=%.4f, pitch=%.4f, yaw=%.4f", curr_baselink_r,
+  //   curr_baselink_p,
+  //            curr_baselink_y);
+
+  //   double roll_diff = des_baselink_r - curr_baselink_r;
+  //   if (fabs(roll_diff) > baselink_rot_change_thresh_)
+  //   {
+  //     curr_baselink_r += roll_diff / fabs(roll_diff) * baselink_rot_change_thresh_;
+  //   }
+  //   else
+  //   {
+  //     curr_baselink_r = des_baselink_r;
+  //   }
+
+  //   // Apply smooth pitch change limit
+  //   double pitch_diff = des_baselink_p - curr_baselink_p;
+  //   if (fabs(pitch_diff) > baselink_rot_change_thresh_)
+  //   {
+  //     curr_baselink_p += pitch_diff / fabs(pitch_diff) * baselink_rot_change_thresh_;
+  //   }
+  //   else
+  //   {
+  //     curr_baselink_p = des_baselink_p;
+  //   }
+
+  //   // Apply smooth yaw change limit
+  //   double yaw_diff = des_baselink_y - curr_baselink_y;
+  //   if (fabs(yaw_diff) > baselink_rot_change_thresh_)
+  //   {
+  //     curr_baselink_y += yaw_diff / fabs(yaw_diff) * baselink_rot_change_thresh_;
+  //   }
+  //   else
+  //   {
+  //     curr_baselink_y = des_baselink_y;
+  //   }
+
+  // yaw=0 means yaw is controlled via omega_z rate command
+  //   final_target_baselink_rot_.setRPY(curr_baselink_r, curr_baselink_p, curr_baselink_y);
+  final_target_baselink_rot_.setRPY(des_baselink_r, des_baselink_p, des_baselink_y);
 }
 
 void DragonCopilot::visualizeSnakeTrajectory()

@@ -161,11 +161,13 @@ private:
 
   /* ===== Cached Transformations (updated once per control cycle) ===== */
   KDL::Frame world_to_cog_;          // CoG frame in world coordinates
-  KDL::Frame world_to_baselink_;     // Baselink frame in world coordinates
   KDL::Frame world_to_root_;         // Root frame in world coordinates
   KDL::Frame root_to_baselink_;      // Transform from root (link1) to baselink (FC)
   KDL::Frame baselink_to_root_;      // Transform from baselink to root
   Eigen::Matrix3d R_world_to_root_;  // Rotation matrix from world to root frame
+  double baselink_yaw_world_;        // Baselink yaw angle in world frame [rad]
+  double baselink_yaw_world_init_;   // Initial baselink yaw angle in world frame [rad] (recorded on first execution)
+  bool baselink_yaw_world_init_recorded_;  // Flag to track if initial yaw has been recorded
 
   /* ===== Cached Joint State ===== */
   KDL::JntArray joint_positions_;  // Current joint positions
@@ -208,6 +210,7 @@ private:
   std::vector<Eigen::Vector3d> snake_target_positions_world_;   // Cached target positions for link tails in world frame
   std::vector<Eigen::Vector3d> snake_current_positions_world_;  // Cached current positions for link tails in world
                                                                 // frame
+  double cached_joint1_yaw_dq_;  // Cached joint1_yaw delta (after clamping) for yaw rate control [rad]
 
   /* ===== ROS Publishers ===== */
   ros::Publisher snake_trajectory_viz_pub_;  // Publisher for snake trajectory visualization
@@ -316,6 +319,17 @@ private:
    * @param dq Joint velocity increments for all joints
    */
   void publishJointCommands(const Eigen::VectorXd& dq);
+
+  /**
+   * @brief Clamp joint deltas to maximum allowed change
+   *
+   * Limits each element of the joint delta vector to be within
+   * [-snake_max_joint_delta_, snake_max_joint_delta_].
+   *
+   * @param dq Input joint velocity increments
+   * @return Clamped joint velocity increments
+   */
+  Eigen::VectorXd clampJointDeltas(const Eigen::VectorXd& dq);
 
   /* ===== Snake Following Methods ===== */
 
