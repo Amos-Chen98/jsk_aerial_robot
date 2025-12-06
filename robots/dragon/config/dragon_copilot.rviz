@@ -467,17 +467,17 @@ Visualization Manager:
         Value: false
       Field of View: 0.7853981852531433
       Focal Point:
-        X: -0.02481960505247116
-        Y: -0.5426125526428223
-        Z: -0.038294076919555664
+        X: 1.0903496742248535
+        Y: 0.01027822494506836
+        Z: 0.007883280515670776
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.7897967100143433
-      Target Frame: dragon/fc
-      Yaw: 4.79550838470459
+      Pitch: 0.8297966718673706
+      Target Frame: dragon/link1
+      Yaw: 0.03232553228735924
     Saved: ~
 Window Geometry:
   Displays:
