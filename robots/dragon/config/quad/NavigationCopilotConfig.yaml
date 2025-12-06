@@ -34,8 +34,8 @@ navigation:
     max_z_vel: 0.5        # Maximum vertical (up/down) velocity [m/s]
     
     # Maximum angular velocities
-    max_yaw_vel: 2.0      # Maximum yaw rotation rate [rad/s] (~28.6 deg/s)
-    max_pitch_vel: 2.0    # Maximum pitch angular velocity [rad/s] (~28.6 deg/s)
+    max_yaw_vel: 0.5      # Maximum yaw rotation rate [rad/s] (~28.6 deg/s)
+    max_pitch_vel: 0.5    # Maximum pitch angular velocity [rad/s] (~28.6 deg/s)
     
     # Deadzone settings
     trigger_deadzone: 0.1 # Deadzone for L2/R2 triggers (normalized 0-1)
@@ -46,7 +46,7 @@ navigation:
     
     # ========== Snake Following Mode ==========
     # When enabled, link2/3/4 tails follow the trajectory traced by link1
-    snake_mode_enabled: true              # Enable snake following mode
+    snake_mode_enabled: false              # Enable snake following mode
     trajectory_sample_interval: 0.1      # Trajectory sample interval [m]
     trajectory_buffer_max_length: 3.0     # Trajectory buffer max length [m]
     snake_ik_gain: 10                    # IK gain (recommended: 0.3-1.0)

@@ -358,7 +358,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   root_cmd.x_vel = -root_cmd.x_vel;
   root_cmd.y_vel = -root_cmd.y_vel;
   root_cmd.pitch_vel = -root_cmd.pitch_vel;
-  root_cmd.yaw_vel = -root_cmd.yaw_vel;
+  root_cmd.yaw_vel = root_cmd.yaw_vel;
 
   return root_cmd;
 }
@@ -591,7 +591,7 @@ void DragonCopilot::cacheRootFrameVelocities(const RootFrameCommand& root_cmd)
 void DragonCopilot::getJoint1DqFromJoystick(const RootFrameCommand& root_cmd)
 {
   joint1_dq_(0) = root_cmd.pitch_vel * loop_du_;
-  joint1_dq_(1) = root_cmd.yaw_vel * loop_du_;
+  joint1_dq_(1) = -root_cmd.yaw_vel * loop_du_;
 
   //   ROS_INFO("[DragonCopilot] Joint1 dq: pitch=%.4f rad, yaw=%.4f rad", joint1_dq_(0), joint1_dq_(1));
 }
@@ -1212,6 +1212,24 @@ void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
   setTargetVelX(des_cog_vel_world.x());
   setTargetVelY(des_cog_vel_world.y());
   setTargetVelZ(des_cog_vel_world.z());  // z velocity already included in root_vel_world_
+
+  // CoG yaw rate control: transfer yaw command to CoG when joint1_yaw reaches limits
+  double des_cog_yaw_rate = 0.0;
+
+  if (link_joint_indices_.size() > 1 && link_joint_lower_limits_.size() > 1 && link_joint_upper_limits_.size() > 1)
+  {
+    double current_joint1_yaw = joint_positions_(link_joint_indices_[1]);
+    double yaw_vel_cmd = root_cmd.yaw_vel;
+    double threshold = 0.02;
+
+    if ((current_joint1_yaw >= link_joint_upper_limits_[1] - threshold && yaw_vel_cmd < 0.0) ||
+        (current_joint1_yaw <= link_joint_lower_limits_[1] + threshold && yaw_vel_cmd > 0.0))
+    {
+      des_cog_yaw_rate = yaw_vel_cmd;
+    }
+  }
+
+  setTargetOmegaZ(des_cog_yaw_rate);
 }
 
 void DragonCopilot::setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd)
