@@ -1,0 +1,8 @@
+<?xml version="1.0"?>
+<launch>
+
+    <arg name="robot_name" default="dragon" />
+
+    <node pkg="aerial_robot_base" type="keyboard_joystick_simulator.py" name="keyboard_joy_node" ns="$(arg robot_name)" output="screen" />
+
+</launch>

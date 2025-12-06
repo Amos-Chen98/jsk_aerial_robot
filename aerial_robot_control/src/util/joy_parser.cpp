@@ -45,6 +45,8 @@ const sensor_msgs::Joy joyParse(const sensor_msgs::Joy& joy_msg)
       joy_cmd.axes[JOY_AXIS_STICK_LEFT_UPWARDS] = joy_msg.axes[PS4_AXIS_STICK_LEFT_UPWARDS];
       joy_cmd.axes[JOY_AXIS_STICK_RIGHT_LEFTWARDS] = joy_msg.axes[PS4_AXIS_STICK_RIGHT_LEFTWARDS];
       joy_cmd.axes[JOY_AXIS_STICK_RIGHT_UPWARDS] = joy_msg.axes[PS4_AXIS_STICK_RIGHT_UPWARDS];
+      joy_cmd.axes[JOY_AXIS_BUTTON_REAR_LEFT_2] = joy_msg.axes[PS4_AXIS_BUTTON_REAR_LEFT_2];
+      joy_cmd.axes[JOY_AXIS_BUTTON_REAR_RIGHT_2] = joy_msg.axes[PS4_AXIS_BUTTON_REAR_RIGHT_2];
       joy_cmd.axes[JOY_AXIS_ACCELEROMETER_LEFT] = joy_msg.axes[PS4_AXIS_ACCELEROMETER_LEFT];
       joy_cmd.axes[JOY_AXIS_ACCELEROMETER_FORWARD] = joy_msg.axes[PS4_AXIS_ACCELEROMETER_FORWARD];
       joy_cmd.axes[JOY_AXIS_ACCELEROMETER_UP] = joy_msg.axes[PS4_AXIS_ACCELEROMETER_UP];
