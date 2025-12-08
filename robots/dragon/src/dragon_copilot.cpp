@@ -17,8 +17,7 @@ DragonCopilot::DragonCopilot()
   , root_yaw_cmd_(0.0)
   , hold_attitude_on_idle_(true)
   , joint1_dq_(Eigen::Vector2d::Zero())
-  , max_joint1_pitch_vel_(0.5)
-  , max_joint1_yaw_vel_(0.5)
+  , max_copilot_rot_vel_(0.5)
   , link_num_(0)       // Will be initialized from robot model
   , link_length_(0.5)  // Default value, will be updated from robot model
   , snake_mode_enabled_(true)
@@ -115,8 +114,7 @@ void DragonCopilot::rosParamInit()
   getParam<double>(navi_nh, "max_x_vel", max_copilot_x_vel_, 1.0);
   getParam<double>(navi_nh, "max_y_vel", max_copilot_y_vel_, 1.0);
   getParam<double>(navi_nh, "max_z_vel", max_copilot_z_vel_, 0.5);
-  getParam<double>(navi_nh, "max_yaw_vel", max_copilot_yaw_vel_, 0.5);
-  getParam<double>(navi_nh, "max_pitch_vel", max_copilot_pitch_vel_, 0.5);  // rad/s
+  getParam<double>(navi_nh, "max_rot_vel", max_copilot_rot_vel_, 0.5);  // rad/s for both pitch and yaw
   getParam<double>(navi_nh, "trigger_deadzone", trigger_deadzone_, 0.1);
   getParam<bool>(navi_nh, "hold_attitude_on_idle", hold_attitude_on_idle_, true);
 
@@ -124,27 +122,23 @@ void DragonCopilot::rosParamInit()
   ROS_INFO("[DragonCopilot] - Max X velocity: %.2f m/s", max_copilot_x_vel_);
   ROS_INFO("[DragonCopilot] - Max Y velocity: %.2f m/s", max_copilot_y_vel_);
   ROS_INFO("[DragonCopilot] - Max Z velocity: %.2f m/s", max_copilot_z_vel_);
-  ROS_INFO("[DragonCopilot] - Max Yaw velocity: %.2f rad/s", max_copilot_yaw_vel_);
-  ROS_INFO("[DragonCopilot] - Max Pitch velocity: %.2f rad/s", max_copilot_pitch_vel_);
+  ROS_INFO("[DragonCopilot] - Max rotation velocity: %.2f rad/s", max_copilot_rot_vel_);
   ROS_INFO("[DragonCopilot] - Hold attitude on idle: %s", hold_attitude_on_idle_ ? "true" : "false");
-
-  /* Load joint1 control parameters (use same max velocities as pitch/yaw) */
-  getParam<double>(navi_nh, "max_joint1_pitch_vel", max_joint1_pitch_vel_, max_copilot_pitch_vel_);
-  getParam<double>(navi_nh, "max_joint1_yaw_vel", max_joint1_yaw_vel_, max_copilot_yaw_vel_);
-  ROS_INFO("[DragonCopilot] - Pitch/Yaw commands now control joint1_pitch and joint1_yaw");
-  ROS_INFO("[DragonCopilot] - Max Joint1 Pitch velocity: %.2f rad/s", max_joint1_pitch_vel_);
-  ROS_INFO("[DragonCopilot] - Max Joint1 Yaw velocity: %.2f rad/s", max_joint1_yaw_vel_);
+  ROS_INFO("[DragonCopilot] - Pitch/Yaw commands control joint1_pitch and joint1_yaw");
 
   /* Load snake-following parameters */
   getParam<bool>(navi_nh, "snake_mode_enabled", snake_mode_enabled_, true);
   getParam<double>(navi_nh, "trajectory_sample_interval", trajectory_sample_interval_, 0.01);
   getParam<double>(navi_nh, "trajectory_buffer_max_length", trajectory_buffer_max_length_, 3.0);
   getParam<double>(navi_nh, "snake_ik_gain", snake_ik_gain_, 1.0);
-  getParam<double>(navi_nh, "snake_max_joint_delta", snake_max_joint_delta_, 0.1);
+
+  // Calculate snake_max_joint_delta from max_rot_vel and loop period
+  snake_max_joint_delta_ = max_copilot_rot_vel_ * loop_du_;
 
   ROS_INFO("[DragonCopilot] Snake following mode: %s", snake_mode_enabled_ ? "enabled" : "disabled");
   ROS_INFO("[DragonCopilot] - Trajectory sample interval: %.3f m", trajectory_sample_interval_);
   ROS_INFO("[DragonCopilot] - Trajectory buffer max length: %.2f m", trajectory_buffer_max_length_);
+  ROS_INFO("[DragonCopilot] - Snake max joint delta: %.4f rad (= max_rot_vel * loop_du)", snake_max_joint_delta_);
 }
 
 void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
@@ -334,7 +328,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   if (fabs(raw_pitch_cmd) > joy_stick_deadzone_)
   {
     // Active input: apply pitch velocity
-    root_cmd.pitch_vel = raw_pitch_cmd * max_copilot_pitch_vel_;
+    root_cmd.pitch_vel = raw_pitch_cmd * max_copilot_rot_vel_;
   }
   else if (hold_attitude_on_idle_)
   {
@@ -350,7 +344,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   /* Process Yaw motion (rotation around z-axis) */
   if (fabs(raw_yaw_cmd) > joy_stick_deadzone_)
   {
-    root_cmd.yaw_vel = raw_yaw_cmd * max_copilot_yaw_vel_;
+    root_cmd.yaw_vel = raw_yaw_cmd * max_copilot_rot_vel_;
   }
 
   // Finally, revert x and y axis, so that the forward on joystick means forward along the head direction
@@ -593,7 +587,7 @@ void DragonCopilot::getJoint1DqFromJoystick(const RootFrameCommand& root_cmd)
   joint1_dq_(0) = root_cmd.pitch_vel * loop_du_;
   joint1_dq_(1) = -root_cmd.yaw_vel * loop_du_;
 
-  //   ROS_INFO("[DragonCopilot] Joint1 dq: pitch=%.4f rad, yaw=%.4f rad", joint1_dq_(0), joint1_dq_(1));
+  ROS_INFO("[DragonCopilot] Joint1 dq: pitch=%.4f rad, yaw=%.4f rad", joint1_dq_(0), joint1_dq_(1));
 }
 
 void DragonCopilot::computeAndPublishJointCommands()

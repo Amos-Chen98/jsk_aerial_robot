@@ -128,12 +128,11 @@ private:
   void transformAndSetControlTargets(const RootFrameCommand& root_cmd);
 
   /* ===== Copilot Control Parameters ===== */
-  double max_copilot_x_vel_;      // maximum forward/backward velocity
-  double max_copilot_y_vel_;      // maximum lateral velocity
-  double max_copilot_z_vel_;      // maximum vertical velocity
-  double max_copilot_yaw_vel_;    // maximum yaw angular velocity
-  double max_copilot_pitch_vel_;  // maximum pitch angular velocity for attitude control
-  double trigger_deadzone_;       // deadzone for L2/R2 triggers
+  double max_copilot_x_vel_;    // maximum forward/backward velocity
+  double max_copilot_y_vel_;    // maximum lateral velocity
+  double max_copilot_z_vel_;    // maximum vertical velocity
+  double max_copilot_rot_vel_;  // maximum rotation angular velocity for pitch and yaw [rad/s]
+  double trigger_deadzone_;     // deadzone for L2/R2 triggers
 
   /* ===== Joystick State Tracking ===== */
   bool r2_trigger_initialized_;  // true after R2 has been pressed at least once
@@ -143,9 +142,7 @@ private:
   bool hold_attitude_on_idle_;   // flag to enable attitude hold when no input (default: true)
 
   /* ===== Joint1 Control via dq ===== */
-  Eigen::Vector2d joint1_dq_;    // joint1 velocity increment [dq_pitch, dq_yaw] [rad]
-  double max_joint1_pitch_vel_;  // max angular velocity for joint1_pitch [rad/s]
-  double max_joint1_yaw_vel_;    // max angular velocity for joint1_yaw [rad/s]
+  Eigen::Vector2d joint1_dq_;  // joint1 velocity increment [dq_pitch, dq_yaw] [rad]
 
   /* ===== Robot Model Parameters (initialized once) ===== */
   int link_num_;                                         // Number of robot links (equals rotor number)
@@ -198,7 +195,7 @@ private:
   double trajectory_sample_interval_;    // Minimum distance between trajectory samples [m]
   double trajectory_buffer_max_length_;  // Maximum arc length to store in buffer [m]
   double snake_ik_gain_;                 // Gain for IK position error correction
-  double snake_max_joint_delta_;         // Maximum joint angle change per iteration [rad]
+  double snake_max_joint_delta_;         // Maximum joint angle change per iteration [rad] (= max_rot_vel * loop_du)
 
   /* ===== Snake Following State ===== */
   std::deque<TrajectoryPoint> trajectory_buffer_;  // Buffer storing recent trajectory points
