@@ -96,6 +96,7 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
 
   /* Initialize snake following publishers and subscribers */
   snake_trajectory_viz_pub_ = nh_.advertise<visualization_msgs::MarkerArray>("copilot/snake_trajectory", 1);
+  target_rotation_motion_pub_ = nh_.advertise<nav_msgs::Odometry>("target_rotation_motion", 1);
   reset_trajectory_sub_ =
       nh_.subscribe("copilot/reset_trajectory", 1, &DragonCopilot::resetTrajectoryBufferCallback, this);
 
@@ -367,7 +368,7 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& root_c
   getJoint1DqFromJoystick(root_cmd);
   computeAndPublishJointCommands();
   setCoGVelocityTargets(root_cmd);
-  //   setBaselinkAttitudeTarget(root_cmd);
+  sendBaselinkYawTarget(root_cmd);  // to compensate yaw changes in joint1_yaw, making link1 independent
 }
 
 void DragonCopilot::cacheFrameTransforms()
@@ -1226,62 +1227,35 @@ void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
   setTargetOmegaZ(des_cog_yaw_rate);
 }
 
-void DragonCopilot::setBaselinkAttitudeTarget(const RootFrameCommand& root_cmd)
+void DragonCopilot::sendBaselinkYawTarget(const RootFrameCommand& root_cmd)
 {
+  // Compute des_baselink_y using the same logic as in setBaselinkAttitudeTarget
   double des_baselink_r = 0.0;
-  double des_baselink_p = 0.0;  // Keep level - don't follow joint1_pitch
-  double des_baselink_y = baselink_yaw_world_init_;
+  double des_baselink_p = 0.0;
+  double des_baselink_y = baselink_yaw_world_;
+
   if (snake_mode_enabled_)
   {
     des_baselink_y += cached_joint1_yaw_dq_;
-    // output the current cached_joint1_yaw_dq_ for debugging
-    ROS_INFO("[DragonCopilot] Cached joint1 yaw dq for baselink yaw target: %.4f rad", cached_joint1_yaw_dq_);
   }
 
-  // Get current target for smooth transition
-  double curr_baselink_r, curr_baselink_p, curr_baselink_y;
-  tf::Matrix3x3(curr_target_baselink_rot_).getRPY(curr_baselink_r, curr_baselink_p, curr_baselink_y);
+  // Create Odometry message for target_rotation_motion topic
+  nav_msgs::Odometry target_msg;
+  target_msg.header.stamp = ros::Time::now();
+  target_msg.header.frame_id = "baselink";  // Using baselink frame as per the callback logic
 
-  // output current roll, pitch, yaw for debugging
-  //   ROS_INFO("[DragonCopilot] Baselink target RPY: roll=%.4f, pitch=%.4f, yaw=%.4f", curr_baselink_r,
-  //   curr_baselink_p,
-  //            curr_baselink_y);
+  // Set orientation (quaternion from RPY)
+  tf::Quaternion q;
+  q.setRPY(des_baselink_r, des_baselink_p, des_baselink_y);
+  tf::quaternionTFToMsg(q, target_msg.pose.pose.orientation);
 
-  //   double roll_diff = des_baselink_r - curr_baselink_r;
-  //   if (fabs(roll_diff) > baselink_rot_change_thresh_)
-  //   {
-  //     curr_baselink_r += roll_diff / fabs(roll_diff) * baselink_rot_change_thresh_;
-  //   }
-  //   else
-  //   {
-  //     curr_baselink_r = des_baselink_r;
-  //   }
+  // Set angular velocity to zero (not controlling angular velocity in this mode)
+  target_msg.twist.twist.angular.x = 0.0;
+  target_msg.twist.twist.angular.y = 0.0;
+  target_msg.twist.twist.angular.z = 0.0;
 
-  //   // Apply smooth pitch change limit
-  //   double pitch_diff = des_baselink_p - curr_baselink_p;
-  //   if (fabs(pitch_diff) > baselink_rot_change_thresh_)
-  //   {
-  //     curr_baselink_p += pitch_diff / fabs(pitch_diff) * baselink_rot_change_thresh_;
-  //   }
-  //   else
-  //   {
-  //     curr_baselink_p = des_baselink_p;
-  //   }
-
-  //   // Apply smooth yaw change limit
-  //   double yaw_diff = des_baselink_y - curr_baselink_y;
-  //   if (fabs(yaw_diff) > baselink_rot_change_thresh_)
-  //   {
-  //     curr_baselink_y += yaw_diff / fabs(yaw_diff) * baselink_rot_change_thresh_;
-  //   }
-  //   else
-  //   {
-  //     curr_baselink_y = des_baselink_y;
-  //   }
-
-  // yaw=0 means yaw is controlled via omega_z rate command
-  //   final_target_baselink_rot_.setRPY(curr_baselink_r, curr_baselink_p, curr_baselink_y);
-  final_target_baselink_rot_.setRPY(des_baselink_r, des_baselink_p, des_baselink_y);
+  // Publish to target_rotation_motion topic
+  target_rotation_motion_pub_.publish(target_msg);
 }
 
 void DragonCopilot::visualizeSnakeTrajectory()

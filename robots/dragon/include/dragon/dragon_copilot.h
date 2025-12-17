@@ -211,6 +211,7 @@ private:
 
   /* ===== ROS Publishers ===== */
   ros::Publisher snake_trajectory_viz_pub_;  // Publisher for snake trajectory visualization
+  ros::Publisher target_rotation_motion_pub_;  // Publisher for target rotation motion
 
   /* ===== ROS Subscribers ===== */
   ros::Subscriber reset_trajectory_sub_;  // Subscriber to reset trajectory buffer
@@ -296,6 +297,17 @@ private:
    * @param root_cmd Root frame command structure containing pitch_vel and yaw_vel
    */
   void getJoint1DqFromJoystick(const RootFrameCommand& root_cmd);
+
+  /**
+   * @brief Send baselink yaw target to target_rotation_motion topic
+   *
+   * This method computes the desired baselink yaw based on the logic from
+   * setBaselinkAttitudeTarget, sets roll and pitch to 0, and publishes
+   * the attitude command to /dragon/target_rotation_motion topic.
+   *
+   * @param root_cmd Root frame command structure (used for consistency with other methods)
+   */
+  void sendBaselinkYawTarget(const RootFrameCommand& root_cmd);
 
   /**
    * @brief Compute and publish all joint commands
