@@ -103,6 +103,11 @@ void DragonCopilot::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
   /* Initialize cached velocities */
   root_vel_world_ = KDL::Vector::Zero();
   root_omega_world_ = KDL::Vector::Zero();
+
+  /* Calculate snake_max_joint_delta from max_rot_vel and loop period */
+  snake_max_joint_delta_ = max_copilot_rot_vel_ * loop_du;
+  ROS_INFO("[DragonCopilot] Loop duration: %.4f s", loop_du);
+  ROS_INFO("[DragonCopilot] Snake max joint delta: %.4f rad (= max_rot_vel * loop_du)", snake_max_joint_delta_);
 }
 
 void DragonCopilot::rosParamInit()
@@ -133,13 +138,9 @@ void DragonCopilot::rosParamInit()
   getParam<double>(navi_nh, "trajectory_buffer_max_length", trajectory_buffer_max_length_, 3.0);
   getParam<double>(navi_nh, "snake_ik_gain", snake_ik_gain_, 1.0);
 
-  // Calculate snake_max_joint_delta from max_rot_vel and loop period
-  snake_max_joint_delta_ = max_copilot_rot_vel_ * loop_du_;
-
   ROS_INFO("[DragonCopilot] Snake following mode: %s", snake_mode_enabled_ ? "enabled" : "disabled");
   ROS_INFO("[DragonCopilot] - Trajectory sample interval: %.3f m", trajectory_sample_interval_);
   ROS_INFO("[DragonCopilot] - Trajectory buffer max length: %.2f m", trajectory_buffer_max_length_);
-  ROS_INFO("[DragonCopilot] - Snake max joint delta: %.4f rad (= max_rot_vel * loop_du)", snake_max_joint_delta_);
 }
 
 void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
