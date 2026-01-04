@@ -1208,24 +1208,6 @@ void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
   setTargetVelX(des_cog_vel_world.x());
   setTargetVelY(des_cog_vel_world.y());
   setTargetVelZ(des_cog_vel_world.z());  // z velocity already included in root_vel_world_
-
-  // CoG yaw rate control: transfer yaw command to CoG when joint1_yaw reaches limits
-  double des_cog_yaw_rate = 0.0;
-
-  if (link_joint_indices_.size() > 1 && link_joint_lower_limits_.size() > 1 && link_joint_upper_limits_.size() > 1)
-  {
-    double current_joint1_yaw = joint_positions_(link_joint_indices_[1]);
-    double yaw_vel_cmd = root_cmd.yaw_vel;
-    double threshold = 0.02;
-
-    if ((current_joint1_yaw >= link_joint_upper_limits_[1] - threshold && yaw_vel_cmd < 0.0) ||
-        (current_joint1_yaw <= link_joint_lower_limits_[1] + threshold && yaw_vel_cmd > 0.0))
-    {
-      des_cog_yaw_rate = yaw_vel_cmd;
-    }
-  }
-
-  setTargetOmegaZ(des_cog_yaw_rate);
 }
 
 void DragonCopilot::sendBaselinkYawTarget(const RootFrameCommand& root_cmd)
@@ -1240,6 +1222,21 @@ void DragonCopilot::sendBaselinkYawTarget(const RootFrameCommand& root_cmd)
     des_baselink_y += cached_joint1_yaw_dq_;
   }
 
+  // Compute CoG yaw rate (same logic as in setCoGVelocityTargets)
+  double des_cog_yaw_rate = 0.0;
+  if (link_joint_indices_.size() > 1 && link_joint_lower_limits_.size() > 1 && link_joint_upper_limits_.size() > 1)
+  {
+    double current_joint1_yaw = joint_positions_(link_joint_indices_[1]);
+    double yaw_vel_cmd = root_cmd.yaw_vel;
+    double threshold = 0.02;
+
+    if ((current_joint1_yaw >= link_joint_upper_limits_[1] - threshold && yaw_vel_cmd < 0.0) ||
+        (current_joint1_yaw <= link_joint_lower_limits_[1] + threshold && yaw_vel_cmd > 0.0))
+    {
+      des_cog_yaw_rate = yaw_vel_cmd;
+    }
+  }
+
   // Create Odometry message for target_rotation_motion topic
   nav_msgs::Odometry target_msg;
   target_msg.header.stamp = ros::Time::now();
@@ -1250,10 +1247,10 @@ void DragonCopilot::sendBaselinkYawTarget(const RootFrameCommand& root_cmd)
   q.setRPY(des_baselink_r, des_baselink_p, des_baselink_y);
   tf::quaternionTFToMsg(q, target_msg.pose.pose.orientation);
 
-  // Set angular velocity to zero (not controlling angular velocity in this mode)
+  // Set angular velocity - include CoG yaw rate when joint reaches limits
   target_msg.twist.twist.angular.x = 0.0;
   target_msg.twist.twist.angular.y = 0.0;
-  target_msg.twist.twist.angular.z = 0.0;
+  target_msg.twist.twist.angular.z = des_cog_yaw_rate;
 
   // Publish to target_rotation_motion topic
   target_rotation_motion_pub_.publish(target_msg);
