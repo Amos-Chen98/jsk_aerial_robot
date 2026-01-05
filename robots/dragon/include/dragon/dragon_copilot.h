@@ -207,7 +207,7 @@ private:
   std::vector<Eigen::Vector3d> snake_target_positions_world_;   // Cached target positions for link tails in world frame
   std::vector<Eigen::Vector3d> snake_current_positions_world_;  // Cached current positions for link tails in world
                                                                 // frame
-  double cached_joint1_yaw_dq_;  // Cached joint1_yaw delta (after clamping) for yaw rate control [rad]
+  double snake_joint1_yaw_dq_;  // Cached joint1_yaw delta (after clamping) for yaw rate control [rad]
 
   /* ===== ROS Publishers ===== */
   ros::Publisher snake_trajectory_viz_pub_;  // Publisher for snake trajectory visualization
@@ -316,8 +316,12 @@ private:
    * 1. Computes snake IK dq if snake_mode_enabled_ (for joint2 onwards)
    * 2. Merges joint1 dq from joystick
    * 3. Publishes all joint commands
+   * 
+   * Note: Snake mode joint commands only applied when x_vel is non-zero
+   * 
+   * @param root_cmd Root frame command structure containing velocity commands
    */
-  void computeAndPublishJointCommands();
+  void computeAndPublishJointCommands(const RootFrameCommand& root_cmd);
 
   /**
    * @brief Publish joint position commands
