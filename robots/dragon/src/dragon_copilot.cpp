@@ -27,7 +27,7 @@ DragonCopilot::DragonCopilot()
   , snake_max_joint_delta_(0.1)         // Max 0.1 rad per iteration
   , total_arc_length_(0.0)
   , trajectory_initialized_(false)
-  , cached_joint1_yaw_dq_(0.0)  // Cached joint1_yaw delta for yaw rate control
+  , snake_joint1_yaw_dq_(0.0)  // Cached joint1_yaw delta for yaw rate control
   , baselink_yaw_world_init_(0.0)
   , baselink_yaw_world_init_recorded_(false)
 {
@@ -367,7 +367,7 @@ void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& root_c
   cacheRootFrameVelocities(root_cmd);
 
   getJoint1DqFromJoystick(root_cmd);
-  computeAndPublishJointCommands();
+  computeAndPublishJointCommands(root_cmd);
   setCoGVelocityTargets(root_cmd);
   sendBaselinkYawTarget(root_cmd);  // to compensate yaw changes in joint1_yaw, making link1 independent
 }
@@ -592,10 +592,11 @@ void DragonCopilot::getJoint1DqFromJoystick(const RootFrameCommand& root_cmd)
   ROS_INFO("[DragonCopilot] Joint1 dq: pitch=%.4f rad, yaw=%.4f rad", joint1_dq_(0), joint1_dq_(1));
 }
 
-void DragonCopilot::computeAndPublishJointCommands()
+void DragonCopilot::computeAndPublishJointCommands(const RootFrameCommand& root_cmd)
 {
   // Initialize dq to zero for all joints
   Eigen::VectorXd dq = Eigen::VectorXd::Zero(link_joint_num_);
+
   // Update trajectory buffer with current link2 head position
   updateTrajectoryBuffer();
 
@@ -619,12 +620,20 @@ void DragonCopilot::computeAndPublishJointCommands()
   // Visualize trajectory
   visualizeSnakeTrajectory();
 
-  if (snake_mode_enabled_ && trajectory_ready)
+  // Check if there is x-direction movement command (with small threshold for numerical stability)
+  bool has_x_motion = (std::abs(root_cmd.x_vel) > 1e-6);
+
+  snake_joint1_yaw_dq_ = 0.0;
+
+  // Only update trajectory and compute snake commands when there is x-direction movement
+  if (has_x_motion && snake_mode_enabled_ && trajectory_ready)
   {
-    // Compute snake IK dq (only affects joint2 onwards in practice)
     dq = computeSnakeJointCommands(snake_target_positions_world_);
-    // Cache joint1_yaw_dq for yaw rate control (used in setCoGVelocityTargets)
-    cached_joint1_yaw_dq_ = dq(1);
+    snake_joint1_yaw_dq_ = dq(1);
+  }
+  else
+  {
+    ROS_INFO_THROTTLE(2.0, "[DragonCopilot] Snake mode idle: no x-direction movement (x_vel=%.4f)", root_cmd.x_vel);
   }
 
   dq(0) += joint1_dq_(0);
@@ -1219,7 +1228,7 @@ void DragonCopilot::sendBaselinkYawTarget(const RootFrameCommand& root_cmd)
 
   if (snake_mode_enabled_)
   {
-    des_baselink_y += cached_joint1_yaw_dq_;
+    des_baselink_y += snake_joint1_yaw_dq_;
   }
 
   // Compute CoG yaw rate (same logic as in setCoGVelocityTargets)

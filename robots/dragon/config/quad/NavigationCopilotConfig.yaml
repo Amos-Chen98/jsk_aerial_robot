@@ -34,7 +34,7 @@ navigation:
     max_z_vel: 0.5        # Maximum vertical (up/down) velocity [m/s]
     
     # Maximum angular velocity (unified for pitch and yaw)
-    max_rot_vel: 0.8      # Maximum rotation rate [rad/s] (~28.6 deg/s)
+    max_rot_vel: 1.5      # Maximum rotation rate
                           # Note: snake_max_joint_delta = max_rot_vel * loop_du (auto-calculated)
     
     # Deadzone settings
