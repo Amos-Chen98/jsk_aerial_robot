@@ -207,7 +207,7 @@ private:
   std::vector<Eigen::Vector3d> snake_target_positions_world_;   // Cached target positions for link tails in world frame
   std::vector<Eigen::Vector3d> snake_current_positions_world_;  // Cached current positions for link tails in world
                                                                 // frame
-  double snake_joint1_yaw_dq_;  // Cached joint1_yaw delta (after clamping) for yaw rate control [rad]
+  double joy_joint1_yaw_dq_;  // Cached joint1_yaw delta (after clamping) for yaw rate control [rad]
 
   /* ===== ROS Publishers ===== */
   ros::Publisher snake_trajectory_viz_pub_;  // Publisher for snake trajectory visualization
@@ -313,15 +313,44 @@ private:
    * @brief Compute and publish all joint commands
    *
    * Unified method that:
-   * 1. Computes snake IK dq if snake_mode_enabled_ (for joint2 onwards)
-   * 2. Merges joint1 dq from joystick
-   * 3. Publishes all joint commands
+   * 1. Computes joint1 angles from snake target position
+   * 2. Sets default positions for other joints (0, 90, 0, 90 degrees)
+   * 3. Adds joystick compensation (joint1_pitch_dq, joint1_yaw_dq) to joint1
+   * 4. Publishes the final desired joint positions
    * 
    * Note: Snake mode joint commands only applied when x_vel is non-zero
    * 
    * @param root_cmd Root frame command structure containing velocity commands
    */
   void computeAndPublishJointCommands(const RootFrameCommand& root_cmd);
+
+  /**
+   * @brief Prepare trajectory data: update buffer, check readiness, compute targets
+   *
+   * This method:
+   * 1. Updates trajectory buffer with current link2 head position
+   * 2. Checks if trajectory has sufficient arc length
+   * 3. Computes current and target link tail positions if ready
+   * 4. Visualizes the trajectory
+   *
+   * @return true if trajectory is ready (sufficient arc length), false otherwise
+   */
+  bool prepareTrajectoryData();
+
+  /**
+   * @brief Compute all joint positions from snake target position
+   *
+   * This method:
+   * 1. Initializes all joints with default values: 0, 90, 0, 90 degrees (for joints 2-5)
+   * 2. Gets link2 tail target position from snake_target_positions_world_[0]
+   * 3. Transforms it from world frame to root frame to link2 frame
+   * 4. Calculates desired joint1_pitch and joint1_yaw from the position in link2 frame
+   * 5. Clamps joint1 angles to joint limits
+   * 6. Returns complete joint position vector with joint1 from snake computation and others at default
+   *
+   * @return Eigen::VectorXd containing all joint positions [joint1_pitch, joint1_yaw, joint2_pitch, ...] in radians
+   */
+  Eigen::VectorXd computeJointAnglesFromSnakeTarget();
 
   /**
    * @brief Publish joint position commands
@@ -394,15 +423,15 @@ private:
   std::vector<Eigen::Vector3d> computeSnakeTargetPositions();
 
   /**
-   * @brief Compute joint angles to achieve target link tail positions using IK
+   * @brief Compute desired joint positions for ALL joints (including joint1) to achieve target link tail positions
    *
-   * Uses iterative inverse kinematics to find joint angles that place each link tail
-   * at its target position.
+   * Directly solves for joint angles geometrically to place link tails at their target positions.
+   * Computes positions for all joints starting from joint1 (link2), forming the target robot configuration.
    *
    * @param target_positions Target positions for each link tail (link2, link3, link4) in world frame
-   * @return Joint angle commands
+   * @return Desired joint positions for all joints based on geometric IK
    */
-  Eigen::VectorXd computeSnakeJointCommands(const std::vector<Eigen::Vector3d>& target_positions);
+  Eigen::VectorXd computeSnakeJointPositions(const std::vector<Eigen::Vector3d>& target_positions);
 
   /**
    * @brief Visualize the trajectory buffer and target positions in RViz
