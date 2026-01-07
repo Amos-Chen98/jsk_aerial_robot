@@ -1124,14 +1124,7 @@ void DragonCopilot::sendBaselinkYawTarget(const RootFrameCommand& root_cmd)
   double des_baselink_p = 0.0;
   double des_baselink_y = baselink_yaw_world_init_ - accumulated_joint1_yaw_from_joy_ * 0.5;
 
-  // print des_baselink_y for debugging
-  ROS_INFO("[DragonCopilot] Sending baselink yaw target: %.4f rad (accumulated_yaw=%.4f rad)", des_baselink_y,
-           accumulated_joint1_yaw_from_joy_);
-  // print a blank line
-  ROS_INFO("");
-
-  // Compute CoG yaw rate (same logic as in setCoGVelocityTargets)
-  double des_cog_yaw_rate = 0.0;
+  // When joint1_yaw reaches limits, compensate the joint1_yaw command to baselink yaw position
   if (link_joint_indices_.size() > 1 && link_joint_lower_limits_.size() > 1 && link_joint_upper_limits_.size() > 1)
   {
     double current_joint1_yaw = joint_positions_(link_joint_indices_[1]);
@@ -1141,9 +1134,16 @@ void DragonCopilot::sendBaselinkYawTarget(const RootFrameCommand& root_cmd)
     if ((current_joint1_yaw >= link_joint_upper_limits_[1] - threshold && yaw_vel_cmd < 0.0) ||
         (current_joint1_yaw <= link_joint_lower_limits_[1] + threshold && yaw_vel_cmd > 0.0))
     {
-      des_cog_yaw_rate = yaw_vel_cmd;
+      // Compensate joint1_yaw command to baselink yaw as position control
+      des_baselink_y -= joint1_dq_(1);
     }
   }
+
+  // print des_baselink_y for debugging
+  ROS_INFO("[DragonCopilot] Sending baselink yaw target: %.4f rad (accumulated_yaw=%.4f rad)", des_baselink_y,
+           accumulated_joint1_yaw_from_joy_);
+  // print a blank line
+  ROS_INFO("");
 
   // Create Odometry message for target_rotation_motion topic
   nav_msgs::Odometry target_msg;
@@ -1155,10 +1155,10 @@ void DragonCopilot::sendBaselinkYawTarget(const RootFrameCommand& root_cmd)
   q.setRPY(des_baselink_r, des_baselink_p, des_baselink_y);
   tf::quaternionTFToMsg(q, target_msg.pose.pose.orientation);
 
-  // Set angular velocity - include CoG yaw rate when joint reaches limits
+  // Set angular velocity to zero (using position control only)
   target_msg.twist.twist.angular.x = 0.0;
   target_msg.twist.twist.angular.y = 0.0;
-  target_msg.twist.twist.angular.z = des_cog_yaw_rate;
+  target_msg.twist.twist.angular.z = 0.0;
 
   // Publish to target_rotation_motion topic
   target_rotation_motion_pub_.publish(target_msg);
