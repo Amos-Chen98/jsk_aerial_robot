@@ -27,7 +27,8 @@ DragonCopilot::DragonCopilot()
   , snake_max_joint_delta_(0.1)         // Max 0.1 rad per iteration
   , total_arc_length_(0.0)
   , trajectory_initialized_(false)
-  , joy_joint1_yaw_dq_(0.0)  // Cached joint1_yaw delta for yaw rate control
+  , joy_joint1_yaw_dq_(0.0)                // Cached joint1_yaw delta for yaw rate control
+  , accumulated_joint1_yaw_from_joy_(0.0)  // Initialize accumulated yaw to zero
   , baselink_yaw_world_init_(0.0)
   , baselink_yaw_world_init_recorded_(false)
 {
@@ -589,7 +590,11 @@ void DragonCopilot::getJoint1DqFromJoystick(const RootFrameCommand& root_cmd)
   joint1_dq_(0) = std::clamp(root_cmd.pitch_vel * loop_du_, -snake_max_joint_delta_, snake_max_joint_delta_);
   joint1_dq_(1) = std::clamp(-root_cmd.yaw_vel * loop_du_, -snake_max_joint_delta_, snake_max_joint_delta_);
 
-  ROS_INFO("[DragonCopilot] Joint1 dq: pitch=%.4f rad, yaw=%.4f rad", joint1_dq_(0), joint1_dq_(1));
+  // Accumulate joint1 yaw changes from joystick commands
+  accumulated_joint1_yaw_from_joy_ += joint1_dq_(1);
+
+  ROS_INFO("[DragonCopilot] Joint1 dq: pitch=%.4f rad, yaw=%.4f rad, accumulated_yaw=%.4f rad", joint1_dq_(0),
+           joint1_dq_(1), accumulated_joint1_yaw_from_joy_);
 }
 
 bool DragonCopilot::prepareTrajectoryData()
@@ -661,6 +666,10 @@ Eigen::VectorXd DragonCopilot::computeJointAnglesFromSnakeTarget()
   desired_joint1_pitch = std::clamp(desired_joint1_pitch, link_joint_lower_limits_[0], link_joint_upper_limits_[0]);
   desired_joint1_yaw = std::clamp(desired_joint1_yaw, link_joint_lower_limits_[1], link_joint_upper_limits_[1]);
 
+  // print the desired joint1 angles
+  ROS_INFO("[DragonCopilot] Desired Joint1 angles from snake target: pitch=%.4f rad, yaw=%.4f rad",
+           desired_joint1_pitch, desired_joint1_yaw);
+
   // Set joint1 positions with joystick compensation
   joint_positions(0) = desired_joint1_pitch + joint1_dq_(0);
   joint_positions(1) = desired_joint1_yaw + joint1_dq_(1);
@@ -690,7 +699,6 @@ void DragonCopilot::computeAndPublishJointCommands(const RootFrameCommand& root_
   // Cache joint1_yaw_dq for sendBaselinkYawTarget
   joy_joint1_yaw_dq_ = joint1_dq_(1);
 
-  // Compute desired joint positions based on snake mode and trajectory readiness
   if (has_x_motion && snake_mode_enabled_ && trajectory_ready && !snake_target_positions_world_.empty())
   {
     // Compute all joint positions from snake target (includes joint1 compensation)
@@ -698,7 +706,6 @@ void DragonCopilot::computeAndPublishJointCommands(const RootFrameCommand& root_
   }
   else
   {
-    // No snake motion - use default joint positions with joystick compensation
     desired_joint_positions(0) = current_link_joint_positions(0) + joint1_dq_(0);
     desired_joint_positions(1) = current_link_joint_positions(1) + joint1_dq_(1);
     desired_joint_positions(2) = 0.0;         // joint2_pitch: 0 degrees
@@ -1113,15 +1120,13 @@ void DragonCopilot::setCoGVelocityTargets(const RootFrameCommand& root_cmd)
 
 void DragonCopilot::sendBaselinkYawTarget(const RootFrameCommand& root_cmd)
 {
-  double joint1_current_yaw = joint_positions_(link_joint_indices_[1]);
-
-  // Compute des_baselink_y using the same logic as in setBaselinkAttitudeTarget
   double des_baselink_r = 0.0;
   double des_baselink_p = 0.0;
-  double des_baselink_y = -joint1_current_yaw;
+  double des_baselink_y = baselink_yaw_world_init_ - accumulated_joint1_yaw_from_joy_ * 0.5;
 
   // print des_baselink_y for debugging
-  ROS_INFO("[DragonCopilot] Sending baselink yaw target: %.4f rad", des_baselink_y);
+  ROS_INFO("[DragonCopilot] Sending baselink yaw target: %.4f rad (accumulated_yaw=%.4f rad)", des_baselink_y,
+           accumulated_joint1_yaw_from_joy_);
   // print a blank line
   ROS_INFO("");
 

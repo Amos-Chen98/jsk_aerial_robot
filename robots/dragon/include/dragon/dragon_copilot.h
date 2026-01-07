@@ -208,6 +208,7 @@ private:
   std::vector<Eigen::Vector3d> snake_current_positions_world_;  // Cached current positions for link tails in world
                                                                 // frame
   double joy_joint1_yaw_dq_;  // Cached joint1_yaw delta (after clamping) for yaw rate control [rad]
+  double accumulated_joint1_yaw_from_joy_;  // Accumulated joint1 yaw change from joystick commands [rad]
 
   /* ===== ROS Publishers ===== */
   ros::Publisher snake_trajectory_viz_pub_;  // Publisher for snake trajectory visualization
