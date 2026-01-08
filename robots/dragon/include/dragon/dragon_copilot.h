@@ -162,7 +162,6 @@ private:
   KDL::Frame root_to_baselink_;      // Transform from root (link1) to baselink (FC)
   KDL::Frame baselink_to_root_;      // Transform from baselink to root
   Eigen::Matrix3d R_world_to_root_;  // Rotation matrix from world to root frame
-  double baselink_yaw_world_;        // Baselink yaw angle in world frame [rad]
   double baselink_yaw_world_init_;   // Initial baselink yaw angle in world frame [rad] (recorded on first execution)
   bool baselink_yaw_world_init_recorded_;  // Flag to track if initial yaw has been recorded
 
@@ -209,6 +208,9 @@ private:
                                                                 // frame
   double joy_joint1_yaw_dq_;  // Cached joint1_yaw delta (after clamping) for yaw rate control [rad]
   double accumulated_joint1_yaw_from_joy_;  // Accumulated joint1 yaw change from joystick commands [rad]
+  double accumulated_joint1_pitch_from_joy_;  // Accumulated joint1 pitch change from joystick commands [rad]
+  double baselink_pitch_world_init_;  // Initial baselink pitch angle in world frame [rad] (recorded on first execution)
+  bool baselink_pitch_world_init_recorded_;  // Flag to track if initial pitch has been recorded
 
   /* ===== ROS Publishers ===== */
   ros::Publisher snake_trajectory_viz_pub_;  // Publisher for snake trajectory visualization
@@ -271,7 +273,7 @@ private:
    *
    * @param root_cmd Root frame command structure containing velocity and attitude commands
    */
-  void setCoGVelocityTargets(const RootFrameCommand& root_cmd);
+  void setCoGTargetVel(const RootFrameCommand& root_cmd);
 
   /**
    * @brief Update baselink attitude target from pitch velocity command
@@ -308,7 +310,7 @@ private:
    *
    * @param root_cmd Root frame command structure (used for consistency with other methods)
    */
-  void sendBaselinkYawTarget(const RootFrameCommand& root_cmd);
+  void setBaselinkTargetPose(const RootFrameCommand& root_cmd);
 
   /**
    * @brief Compute and publish all joint commands
@@ -342,16 +344,29 @@ private:
    * @brief Compute all joint positions from snake target position
    *
    * This method:
-   * 1. Initializes all joints with default values: 0, 90, 0, 90 degrees (for joints 2-5)
-   * 2. Gets link2 tail target position from snake_target_positions_world_[0]
-   * 3. Transforms it from world frame to root frame to link2 frame
-   * 4. Calculates desired joint1_pitch and joint1_yaw from the position in link2 frame
-   * 5. Clamps joint1 angles to joint limits
-   * 6. Returns complete joint position vector with joint1 from snake computation and others at default
+   * 1. Iteratively computes desired joint angles geometrically using forward kinematics
+   * 2. For each link, computes the expected frame based on previously computed joint angles
+   * 3. Transforms the tail target to that link's frame and calculates desired joint angles
+   * 4. Clamps joint angles to joint limits
+   * 5. Adds joystick compensation to joint1
+   *
+   * This approach avoids modifying the robot_model_ by using pure geometric calculations.
    *
    * @return Eigen::VectorXd containing all joint positions [joint1_pitch, joint1_yaw, joint2_pitch, ...] in radians
    */
   Eigen::VectorXd computeJointAnglesFromSnakeTarget();
+
+  /**
+   * @brief Compute expected link frame based on desired joint positions using forward kinematics
+   *
+   * Calculates the frame of a link in root coordinates by applying forward kinematics
+   * using the desired joint positions computed so far. This avoids modifying robot_model_.
+   *
+   * @param link_index The link index (1-based: link1, link2, link3, link4)
+   * @param desired_joint_positions The desired joint positions computed so far
+   * @return The expected frame of the link in root coordinates
+   */
+  KDL::Frame computeExpectedLinkFrame(int link_index, const Eigen::VectorXd& desired_joint_positions);
 
   /**
    * @brief Publish joint position commands
