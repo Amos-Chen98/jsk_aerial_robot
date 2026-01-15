@@ -638,170 +638,121 @@ Eigen::VectorXd DragonCopilot::computeJointAnglesFromSnakeTarget()
   // Initialize all joint positions with default values
   Eigen::VectorXd joint_positions = Eigen::VectorXd::Zero(link_joint_num_);
 
-  // Hard-code default values for joints 2-5: 0, 90, 0, 90 degrees
-  joint_positions(2) = 0.0;         // joint2_pitch: 0 degrees
-  joint_positions(3) = M_PI / 2.0;  // joint2_yaw: 90 degrees
-  joint_positions(4) = 0.0;         // joint3_pitch: 0 degrees
-  joint_positions(5) = M_PI / 2.0;  // joint3_yaw: 90 degrees
+  // Compute desired joint angles iteratively using pure geometric forward kinematics
+  // This avoids modifying the robot model entirely - we calculate expected link frames directly
 
-  // Get snake_target_positions_world_[0] (link2 tail position) and transform to root frame
-  const Eigen::Vector3d& link2_tail_target_world = snake_target_positions_world_[0];
-  KDL::Vector link2_tail_target_world_kdl(link2_tail_target_world.x(), link2_tail_target_world.y(),
-                                          link2_tail_target_world.z());
+  // Iterate through all links (starting from link2) to compute desired joint angles
+  // For a 4-link robot: i=0 computes joint1 (for link2), i=1 computes joint2 (for link3), i=2 computes joint3 (for
+  // link4)
+  for (int i = 0; i < link_num_ - 1; i++)
+  {
+    // Get snake target position for current link's tail
+    // snake_target_positions_world_[0] = link2 tail, [1] = link3 tail, [2] = link4 tail
+    const Eigen::Vector3d& link_tail_target_world = snake_target_positions_world_[i];
+    KDL::Vector link_tail_target_world_kdl(link_tail_target_world.x(), link_tail_target_world.y(),
+                                           link_tail_target_world.z());
 
-  // Transform from world frame to root frame
-  KDL::Vector link2_tail_target_root = world_to_root_.Inverse() * link2_tail_target_world_kdl;
+    // Transform from world frame to root frame
+    KDL::Vector link_tail_target_root = world_to_root_.Inverse() * link_tail_target_world_kdl;
 
-  // Get link2 frame (relative to root frame)
-  // link_frames_[1] is link2's frame in root coordinates
-  const KDL::Frame& link2_frame = link_frames_[1];
+    // Get or compute the expected link frame (relative to root frame)
+    KDL::Frame expected_link_frame;
 
-  // Transform link2_tail_target from root frame to link2 frame
-  KDL::Vector link2_tail_target_link2 = link2_frame.Inverse() * link2_tail_target_root;
+    if (i == 0)
+    {
+      // For first iteration (joint1 for link2), use the current cached link2 frame
+      expected_link_frame = link_frames_[1];
+    }
+    else
+    {
+      // For subsequent iterations, compute the expected link frame geometrically
+      // based on desired joint positions computed so far
+      expected_link_frame = computeExpectedLinkFrame(i + 1, joint_positions);
+    }
 
-  // Calculate desired joint1_pitch and joint1_yaw from position in link2 frame
-  // In link2's local frame, we want to orient link2 to point toward the target
-  double dx = link2_tail_target_link2.x();
-  double dy = link2_tail_target_link2.y();
-  double dz = link2_tail_target_link2.z();
+    // Transform link_tail_target from root frame to link frame
+    KDL::Vector link_tail_target_link = expected_link_frame.Inverse() * link_tail_target_root;
 
-  // Pitch angle: rotation around y-axis (atan2(-z, x))
-  double desired_joint1_pitch = std::atan2(-dz, dx);
+    // Calculate desired joint pitch and yaw from position in link frame
+    // We want to orient the link to point toward the target
+    double dx = link_tail_target_link.x();
+    double dy = link_tail_target_link.y();
+    double dz = link_tail_target_link.z();
 
-  // Yaw angle: rotation around z-axis
-  double dx_dz_norm = std::sqrt(dx * dx + dz * dz);
-  double desired_joint1_yaw = std::atan2(dy, dx_dz_norm);
+    // Pitch angle: rotation around y-axis (atan2(-z, x))
+    double desired_joint_pitch = std::atan2(-dz, dx);
 
-  // Clamp to joint limits
-  desired_joint1_pitch = std::clamp(desired_joint1_pitch, link_joint_lower_limits_[0], link_joint_upper_limits_[0]);
-  desired_joint1_yaw = std::clamp(desired_joint1_yaw, link_joint_lower_limits_[1], link_joint_upper_limits_[1]);
+    // Yaw angle: rotation around z-axis
+    double dx_dz_norm = std::sqrt(dx * dx + dz * dz);
+    double desired_joint_yaw = std::atan2(dy, dx_dz_norm);
 
-  // print the desired joint1 angles
-  ROS_INFO("[DragonCopilot] Desired Joint1 angles from snake target: pitch=%.4f rad, yaw=%.4f rad",
-           desired_joint1_pitch, desired_joint1_yaw);
+    // Clamp to joint limits
+    int joint_pitch_limit_idx = 2 * i;
+    int joint_yaw_limit_idx = 2 * i + 1;
+    desired_joint_pitch = std::clamp(desired_joint_pitch, link_joint_lower_limits_[joint_pitch_limit_idx],
+                                     link_joint_upper_limits_[joint_pitch_limit_idx]);
+    desired_joint_yaw = std::clamp(desired_joint_yaw, link_joint_lower_limits_[joint_yaw_limit_idx],
+                                   link_joint_upper_limits_[joint_yaw_limit_idx]);
 
-  // Set joint1 positions with joystick compensation
-  joint_positions(0) = desired_joint1_pitch + joint1_dq_(0);
-  joint_positions(1) = desired_joint1_yaw + joint1_dq_(1);
+    // Log the desired joint angles
+    ROS_INFO("[DragonCopilot] Desired Joint%d angles from snake target: pitch=%.4f rad, yaw=%.4f rad", i + 1,
+             desired_joint_pitch, desired_joint_yaw);
+
+    // Store joint positions (without joystick compensation yet)
+    joint_positions(2 * i) = desired_joint_pitch;
+    joint_positions(2 * i + 1) = desired_joint_yaw;
+  }
+
+  // Add joystick compensation for joint1 only
+  joint_positions(0) += joint1_dq_(0);
+  joint_positions(1) += joint1_dq_(1);
+
+  // Replace the values for the last pair of joints
+  joint_positions(4) = 0.0;
+  joint_positions(5) = M_PI / 2.0;
 
   return joint_positions;
 }
 
-// Eigen::VectorXd DragonCopilot::computeJointAnglesFromSnakeTarget()
-// {
-//   // Initialize all joint positions with default values
-//   Eigen::VectorXd joint_positions = Eigen::VectorXd::Zero(link_joint_num_);
+KDL::Frame DragonCopilot::computeExpectedLinkFrame(int link_index, const Eigen::VectorXd& desired_joint_positions)
+{
+  // Compute the expected frame of link_index in root coordinates
+  // based on desired joint positions (forward kinematics)
+  // link_index: 1-based (link1, link2, link3, link4)
 
-//   // Compute desired joint angles iteratively using pure geometric forward kinematics
-//   // This avoids modifying the robot model entirely - we calculate expected link frames directly
+  // Start from link1 (root frame origin with identity rotation)
+  KDL::Frame current_frame = KDL::Frame::Identity();
 
-//   // Iterate through all links (starting from link2) to compute desired joint angles
-//   // For a 4-link robot: i=0 computes joint1 (for link2), i=1 computes joint2 (for link3), i=2 computes joint3 (for
-//   link4) for (int i = 0; i < link_num_ - 1; i++)
-//   {
-//     // Get snake target position for current link's tail
-//     // snake_target_positions_world_[0] = link2 tail, [1] = link3 tail, [2] = link4 tail
-//     const Eigen::Vector3d& link_tail_target_world = snake_target_positions_world_[i];
-//     KDL::Vector link_tail_target_world_kdl(link_tail_target_world.x(), link_tail_target_world.y(),
-//                                            link_tail_target_world.z());
+  // For each link from link1 to the target link, apply the joint transformations
+  for (int i = 1; i <= link_index; i++)
+  {
+    if (i == 1)
+    {
+      // Link1 is at root with identity rotation (no joints before it)
+      current_frame = link_frames_[0];  // Use cached link1 frame
+    }
+    else
+    {
+      // For link i (i >= 2), we need to apply joint(i-1) transformations
+      // Joint indices: joint1 controls link1->link2, joint2 controls link2->link3, etc.
+      int joint_idx = i - 2;  // joint1 has joint_idx=0, joint2 has joint_idx=1, etc.
 
-//     // Transform from world frame to root frame
-//     KDL::Vector link_tail_target_root = world_to_root_.Inverse() * link_tail_target_world_kdl;
+      // Get desired joint angles for this joint
+      double joint_pitch = desired_joint_positions(2 * joint_idx);
+      double joint_yaw = desired_joint_positions(2 * joint_idx + 1);
 
-//     // Get or compute the expected link frame (relative to root frame)
-//     KDL::Frame expected_link_frame;
+      // Apply pitch rotation (around y-axis) then yaw rotation (around z-axis)
+      KDL::Rotation joint_rotation = KDL::Rotation::RotY(joint_pitch) * KDL::Rotation::RotZ(joint_yaw);
 
-//     if (i == 0)
-//     {
-//       // For first iteration (joint1 for link2), use the current cached link2 frame
-//       expected_link_frame = link_frames_[1];
-//     }
-//     else
-//     {
-//       // For subsequent iterations, compute the expected link frame geometrically
-//       // based on desired joint positions computed so far
-//       expected_link_frame = computeExpectedLinkFrame(i + 1, joint_positions);
-//     }
+      // The new link frame is: translate by link_length along previous link's x-axis, then rotate
+      KDL::Vector translation = current_frame.M * KDL::Vector(link_length_, 0.0, 0.0);
+      current_frame.p = current_frame.p + translation;
+      current_frame.M = current_frame.M * joint_rotation;
+    }
+  }
 
-//     // Transform link_tail_target from root frame to link frame
-//     KDL::Vector link_tail_target_link = expected_link_frame.Inverse() * link_tail_target_root;
-
-//     // Calculate desired joint pitch and yaw from position in link frame
-//     // We want to orient the link to point toward the target
-//     double dx = link_tail_target_link.x();
-//     double dy = link_tail_target_link.y();
-//     double dz = link_tail_target_link.z();
-
-//     // Pitch angle: rotation around y-axis (atan2(-z, x))
-//     double desired_joint_pitch = std::atan2(-dz, dx);
-
-//     // Yaw angle: rotation around z-axis
-//     double dx_dz_norm = std::sqrt(dx * dx + dz * dz);
-//     double desired_joint_yaw = std::atan2(dy, dx_dz_norm);
-
-//     // Clamp to joint limits
-//     int joint_pitch_limit_idx = 2 * i;
-//     int joint_yaw_limit_idx = 2 * i + 1;
-//     desired_joint_pitch = std::clamp(desired_joint_pitch, link_joint_lower_limits_[joint_pitch_limit_idx],
-//                                      link_joint_upper_limits_[joint_pitch_limit_idx]);
-//     desired_joint_yaw = std::clamp(desired_joint_yaw, link_joint_lower_limits_[joint_yaw_limit_idx],
-//                                    link_joint_upper_limits_[joint_yaw_limit_idx]);
-
-//     // Log the desired joint angles
-//     ROS_INFO("[DragonCopilot] Desired Joint%d angles from snake target: pitch=%.4f rad, yaw=%.4f rad", i + 1,
-//              desired_joint_pitch, desired_joint_yaw);
-
-//     // Store joint positions (without joystick compensation yet)
-//     joint_positions(2 * i) = desired_joint_pitch;
-//     joint_positions(2 * i + 1) = desired_joint_yaw;
-//   }
-
-//   // Add joystick compensation for joint1 only
-//   joint_positions(0) += joint1_dq_(0);
-//   joint_positions(1) += joint1_dq_(1);
-
-//   return joint_positions;
-// }
-
-// KDL::Frame DragonCopilot::computeExpectedLinkFrame(int link_index, const Eigen::VectorXd& desired_joint_positions)
-// {
-//   // Compute the expected frame of link_index in root coordinates
-//   // based on desired joint positions (forward kinematics)
-//   // link_index: 1-based (link1, link2, link3, link4)
-
-//   // Start from link1 (root frame origin with identity rotation)
-//   KDL::Frame current_frame = KDL::Frame::Identity();
-
-//   // For each link from link1 to the target link, apply the joint transformations
-//   for (int i = 1; i <= link_index; i++)
-//   {
-//     if (i == 1)
-//     {
-//       // Link1 is at root with identity rotation (no joints before it)
-//       current_frame = link_frames_[0];  // Use cached link1 frame
-//     }
-//     else
-//     {
-//       // For link i (i >= 2), we need to apply joint(i-1) transformations
-//       // Joint indices: joint1 controls link1->link2, joint2 controls link2->link3, etc.
-//       int joint_idx = i - 2;  // joint1 has joint_idx=0, joint2 has joint_idx=1, etc.
-
-//       // Get desired joint angles for this joint
-//       double joint_pitch = desired_joint_positions(2 * joint_idx);
-//       double joint_yaw = desired_joint_positions(2 * joint_idx + 1);
-
-//       // Apply pitch rotation (around y-axis) then yaw rotation (around z-axis)
-//       KDL::Rotation joint_rotation = KDL::Rotation::RotY(joint_pitch) * KDL::Rotation::RotZ(joint_yaw);
-
-//       // The new link frame is: translate by link_length along previous link's x-axis, then rotate
-//       KDL::Vector translation = current_frame.M * KDL::Vector(link_length_, 0.0, 0.0);
-//       current_frame.p = current_frame.p + translation;
-//       current_frame.M = current_frame.M * joint_rotation;
-//     }
-//   }
-
-//   return current_frame;
-// }
+  return current_frame;
+}
 
 void DragonCopilot::computeAndPublishJointCommands(const RootFrameCommand& root_cmd)
 {
