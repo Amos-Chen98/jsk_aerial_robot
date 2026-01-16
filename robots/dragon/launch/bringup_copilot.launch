@@ -12,8 +12,10 @@
   <arg name="model_name" value="vim4_202311" unless="$(arg new_model)"/>
   <arg name="link_num" default="quad" />
   <arg name="battery" default="true" />
-  <arg name="suffix" value="" if="$(arg battery)" />
-  <arg name="suffix" value="_no_bat" unless="$(arg battery)" />
+  <arg name="camera" default="false" />
+  <arg name="suffix" value="_camera" if="$(eval arg('battery') and arg('camera'))" />
+  <arg name="suffix" value="_no_bat" if="$(eval arg('battery') == false)" />
+  <arg name="suffix" value="" if="$(eval arg('battery') and arg('camera') == false)" />
   <arg name="estimate_mode"  default= "1" />
   <arg name="sim_estimate_mode"  default= "2" />
   <arg name="takeoff_height"  default= "0" />

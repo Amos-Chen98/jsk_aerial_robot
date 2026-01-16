@@ -1,0 +1,44 @@
+<?xml version="1.0"?>
+<robot
+    xmlns:xacro="http://www.ros.org/wiki/xacro" name="dragon_camera" >
+
+  <!-- Head camera links: camera mounted on the head (link1) with x-axis reversed from root frame -->
+  
+  <!-- camera link -->
+  <link name="head_camera_link">
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0.05"/>
+      <inertia
+          ixx="3.3333e-06" ixy="0.0" ixz="0.0"
+          iyy="3.3333e-06" iyz="0.0"
+          izz="3.3333e-06"/>
+    </inertial>
+    <visual>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <geometry>
+        <box size="0.02 0.02 0.02"/>
+      </geometry>
+    </visual>
+  </link>
+
+  <joint name="head_camera_joint" type="fixed">
+    <parent link="link1"/>
+    <child link="head_camera_link"/>
+    <!-- x-axis reversed from root frame: rotation of pi around z-axis -->
+    <origin rpy="0 0 ${pi}" xyz="0 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+  <!-- camera optical frame (standard ROS camera frame: x forward, y left, z up) -->
+  <link name="head_camera_optical_frame"/>
+  
+  <joint name="head_camera_optical_joint" type="fixed">
+    <parent link="head_camera_link"/>
+    <child link="head_camera_optical_frame"/>
+    <!-- Transform to ROS optical frame convention -->
+    <origin rpy="${-pi/2} 0 ${-pi/2}" xyz="0 0 0"/>
+    <axis xyz="0 0 1"/>
+  </joint>
+
+</robot>

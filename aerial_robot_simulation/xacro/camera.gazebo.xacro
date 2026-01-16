@@ -1,0 +1,54 @@
+<?xml version="1.0"?>
+<robot
+    xmlns:xacro="http://www.ros.org/wiki/xacro" name="camera_sensor" >
+
+  <!-- Generic camera sensor macro for Gazebo simulation -->
+  <xacro:macro name="gazebo_camera_sensor" params="robot_name camera_name camera_link optical_frame
+                                                     update_rate:=30.0 
+                                                     width:=640 height:=480 
+                                                     fov:=1.3962634 
+                                                     near:=0.02 far:=300.0
+                                                     image_topic:=image_raw 
+                                                     info_topic:=camera_info">
+    
+    <gazebo reference="${camera_link}">
+      <sensor type="camera" name="${camera_name}_sensor">
+        <update_rate>${update_rate}</update_rate>
+        <camera name="${camera_name}">
+          <horizontal_fov>${fov}</horizontal_fov>
+          <image>
+            <width>${width}</width>
+            <height>${height}</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>${near}</near>
+            <far>${far}</far>
+          </clip>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+        <plugin name="${camera_name}_controller" filename="libgazebo_ros_camera.so">
+          <robotNamespace>${robot_name}</robotNamespace>
+          <alwaysOn>true</alwaysOn>
+          <updateRate>0.0</updateRate>
+          <cameraName>${camera_name}</cameraName>
+          <imageTopicName>${image_topic}</imageTopicName>
+          <cameraInfoTopicName>${info_topic}</cameraInfoTopicName>
+          <frameName>${optical_frame}</frameName>
+          <hackBaseline>0.07</hackBaseline>
+          <distortionK1>0.0</distortionK1>
+          <distortionK2>0.0</distortionK2>
+          <distortionK3>0.0</distortionK3>
+          <distortionT1>0.0</distortionT1>
+          <distortionT2>0.0</distortionT2>
+        </plugin>
+      </sensor>
+    </gazebo>
+
+  </xacro:macro>
+
+</robot>
