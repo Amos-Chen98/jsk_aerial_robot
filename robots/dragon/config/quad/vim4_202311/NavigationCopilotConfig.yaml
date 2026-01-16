@@ -1,0 +1,60 @@
+# Dragon Copilot Navigation Configuration
+# Custom joystick mapping for intuitive flight control
+
+navigation:
+  # Basic navigation settings (inherited from base config)
+  xy_control_mode: 0  # POS_CONTROL_MODE
+  takeoff_height: 1.0
+  outdoor_takeoff_height: 1.0
+  
+  joy_udp: false
+  teleop_local_frame: fc # flight controller frame
+  
+  # Force landing
+  force_landing_auto_stop_flag: false
+  
+  # Baselink rotation settings
+  baselink_rot_pub_interval: 0.1    # 10 Hz update rate for smooth pitch control
+  baselink_rot_change_thresh: 0.02  # Smooth pitch transitions
+  
+  # Trajectory settings
+  trajectory_min_du: 2.0
+  trajectory_mean_yaw_rate: 0.6
+  enable_latch_yaw_trajectory: false
+  
+  # GPS waypoint
+  gps_waypoint_threshold: 3.0
+  gps_waypoint_check_du: 1.0
+
+  # ========== Dragon Copilot Specific Settings ==========
+  copilot:
+    # Maximum velocities
+    max_x_vel: 0.5        # Maximum forward/backward velocity [m/s]
+    max_y_vel: 0.5        # Maximum lateral (left/right) velocity [m/s]
+    max_z_vel: 0.5        # Maximum vertical (up/down) velocity [m/s]
+    
+    # Maximum angular velocity (unified for pitch and yaw)
+    max_rot_vel: 1.5      # Maximum rotation rate
+                          # Note: snake_max_joint_delta = max_rot_vel * loop_du (auto-calculated)
+    
+    # Deadzone settings
+    trigger_deadzone: 0.1 # Deadzone for L2/R2 triggers (normalized 0-1)
+    
+    # Attitude hold behavior
+    hold_attitude_on_idle: true  # When true, maintains pitch attitude when stick is released
+                                 # When false, returns to level flight (pitch=0) when idle
+    
+    # ========== Snake Following Mode ==========
+    # When enabled, link2/3/4 tails follow the trajectory traced by link1
+    snake_mode_enabled: true              # Enable snake following mode
+    trajectory_sample_interval: 0.1      # Trajectory sample interval [m]
+    trajectory_buffer_max_length: 3.0     # Trajectory buffer max length [m]
+    snake_ik_gain: 10                    # IK gain (recommended: 0.3-1.0)
+    
+# Notes:
+# - R2 trigger: Forward movement (body x-axis positive)
+# - L2 trigger: Backward movement (body x-axis negative)
+# - Left stick horizontal: Yaw rotation
+# - Left stick vertical: Pitch attitude control
+# - Right stick horizontal: Lateral translation (body y-axis)
+# - Right stick vertical: Vertical translation (vertical z-axis)

@@ -8,7 +8,7 @@
   <!--  model type 4: end -->
 
   <!-- general attribute -->
-  <baselink name="fc" />
+  <baselink name="link1" />
   <thrust_link name="thrust" />
   
   <!-- kinematics [m] -->
