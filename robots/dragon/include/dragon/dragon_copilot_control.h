@@ -21,22 +21,6 @@ namespace aerial_robot_navigation
 {
 
 /**
- * @brief Structure to hold control commands in root frame
- */
-struct RootFrameCommand
-{
-  double x_vel;      // Forward(+)/backward(-) velocity in root frame body coordinates [m/s]
-  double y_vel;      // Left(+)/right(-) velocity in root frame body coordinates [m/s]
-  double z_vel;      // Up(+)/down(-) velocity in world frame [m/s]
-  double yaw_vel;    // Yaw angular velocity (counter-clockwise: +) [rad/s]
-  double pitch_vel;  // Pitch angular velocity (nose up: +, nose down: -) [rad/s]
-
-  RootFrameCommand() : x_vel(0.0), y_vel(0.0), z_vel(0.0), yaw_vel(0.0), pitch_vel(0.0)
-  {
-  }
-};
-
-/**
  * @brief Structure to hold a trajectory point with position and timestamp
  */
 struct TrajectoryPoint
@@ -89,11 +73,11 @@ public:
                        const DragonCopilotControlParams& params);
   ~DragonCopilotControl() = default;
 
-  void updateControlState(const RootFrameCommand& root_cmd);
-  Eigen::VectorXd computeJointPositions(const RootFrameCommand& root_cmd);
+  void updateControlState(const nav_msgs::Odometry& root_cmd);
+  Eigen::VectorXd computeJointPositions(const nav_msgs::Odometry& root_cmd);
 
   Eigen::Vector3d computeCoGVelocity() const;
-  nav_msgs::Odometry computeBaselinkTargetPose(const RootFrameCommand& root_cmd) const;
+  nav_msgs::Odometry computeBaselinkTargetPose(const nav_msgs::Odometry& root_cmd) const;
   visualization_msgs::MarkerArray getSnakeTrajectoryVizMsg();
 
   // Accessors for cached data needed by DragonCopilot (if any)
@@ -114,8 +98,8 @@ private:
   void cacheFrameTransforms();
   void cacheJacobians();
   void cacheLastLinkTailJacobian();
-  void cacheRootFrameVelocities(const RootFrameCommand& root_cmd);
-  void getJoint1DqFromJoystick(const RootFrameCommand& root_cmd);
+  void cacheRootFrameVelocities(const nav_msgs::Odometry& root_cmd);
+  void getJoint1DqFromJoystick(const nav_msgs::Odometry& root_cmd);
   
   bool prepareTrajectoryData();
   void updateTrajectoryBuffer();

@@ -81,9 +81,9 @@ private:
    * Handles trigger initialization, deadzone processing, and command scaling.
    *
    * @param joy_cmd Parsed joystick message
-   * @return RootFrameCommand structure containing all control commands
+   * @return nav_msgs::Odometry Odometry structure containing all control commands
    */
-  RootFrameCommand parseJoystickInputs(const sensor_msgs::Joy& joy_cmd);
+  nav_msgs::Odometry parseJoystickInputs(const sensor_msgs::Joy& joy_cmd);
 
   /**
    * @brief Transform velocity commands from root frame to world frame and set control targets
@@ -94,7 +94,7 @@ private:
    *
    * @param root_cmd Root frame command structure containing velocity and attitude commands
    */
-  void transformAndSetControlTargets(const RootFrameCommand& root_cmd);
+  void transformAndSetControlTargets(const nav_msgs::Odometry& root_cmd);
 
   /* ===== Copilot Control Parameters ===== */
   // Stored in struct to pass to DragonCopilotControl

@@ -212,15 +212,15 @@ void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
     return;
 
   /* Parse joystick inputs to get velocity and attitude commands */
-  RootFrameCommand root_cmd = parseJoystickInputs(joy_cmd);
+  nav_msgs::Odometry root_cmd = parseJoystickInputs(joy_cmd);
 
   /* Transform velocity commands and set control targets */
   transformAndSetControlTargets(root_cmd);
 }
 
-RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_cmd)
+nav_msgs::Odometry DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_cmd)
 {
-  RootFrameCommand root_cmd;
+  nav_msgs::Odometry root_cmd;
   // ---------- X-axis control (forward/backward) via R2/L2 triggers ----------
   // R2 trigger: forward (neutral=+1, full=-1, so we need to invert and normalize)
   // Handle initialization issue: ROS topic reports 0 until first press, then reports correctly
@@ -273,7 +273,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   // Calculate net x velocity command
   // R2 (forward_cmd) -> positive X velocity (root frame forward direction)
   // L2 (backward_cmd) -> negative X velocity (root frame backward direction)
-  root_cmd.x_vel = (forward_cmd - backward_cmd) * copilot_params_.max_copilot_x_vel;
+  root_cmd.twist.twist.linear.x = (forward_cmd - backward_cmd) * copilot_params_.max_copilot_x_vel;
 
   // ---------- Y-axis control via JOY_AXIS_STICK_RIGHT ----------
   // Right stick horizontal: lateral translation (y-axis)
@@ -282,7 +282,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   /* Process Y-axis motion (lateral translation) */
   if (fabs(raw_y_cmd) > copilot_params_.joy_stick_deadzone)
   {
-    root_cmd.y_vel = raw_y_cmd * copilot_params_.max_copilot_y_vel;
+    root_cmd.twist.twist.linear.y = raw_y_cmd * copilot_params_.max_copilot_y_vel;
   }
 
   // ---------- Z-axis control via JOY_AXIS_STICK_RIGHT ----------
@@ -292,7 +292,7 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   /* Process Z-axis motion (vertical translation) */
   if (fabs(raw_z_cmd) > copilot_params_.joy_stick_deadzone)
   {
-    root_cmd.z_vel = raw_z_cmd * copilot_params_.max_copilot_z_vel;
+    root_cmd.twist.twist.linear.z = raw_z_cmd * copilot_params_.max_copilot_z_vel;
   }
 
   // ---------- pitch control via JOY_AXIS_STICK_LEFT ----------
@@ -303,12 +303,12 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   if (fabs(raw_pitch_cmd) > copilot_params_.joy_stick_deadzone)
   {
     // Active input: apply pitch velocity
-    root_cmd.pitch_vel = raw_pitch_cmd * copilot_params_.max_copilot_rot_vel;
+    root_cmd.twist.twist.angular.y = raw_pitch_cmd * copilot_params_.max_copilot_rot_vel;
   }
   else if (copilot_params_.hold_attitude_on_idle)
   {
     // When no input and attitude hold is enabled, set pitch_vel to 0 (hold current attitude)
-    root_cmd.pitch_vel = 0.0;
+    root_cmd.twist.twist.angular.y = 0.0;
   }
   // else: root_cmd.pitch_vel remains 0.0 from constructor (will return to level flight)
 
@@ -319,20 +319,20 @@ RootFrameCommand DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_
   /* Process Yaw motion (rotation around z-axis) */
   if (fabs(raw_yaw_cmd) > copilot_params_.joy_stick_deadzone)
   {
-    root_cmd.yaw_vel = raw_yaw_cmd * copilot_params_.max_copilot_rot_vel;
+    root_cmd.twist.twist.angular.z = raw_yaw_cmd * copilot_params_.max_copilot_rot_vel;
   }
 
   // Finally, revert x and y axis, so that the forward on joystick means forward along the head direction
   // Also revert yaw so that stick right increases joint1_yaw
-  root_cmd.x_vel = -root_cmd.x_vel;
-  root_cmd.y_vel = -root_cmd.y_vel;
-  root_cmd.pitch_vel = -root_cmd.pitch_vel;
-  root_cmd.yaw_vel = root_cmd.yaw_vel;
+  root_cmd.twist.twist.linear.x = -root_cmd.twist.twist.linear.x;
+  root_cmd.twist.twist.linear.y = -root_cmd.twist.twist.linear.y;
+  root_cmd.twist.twist.angular.y = -root_cmd.twist.twist.angular.y;
+  root_cmd.twist.twist.angular.z = root_cmd.twist.twist.angular.z;
 
   return root_cmd;
 }
 
-void DragonCopilot::transformAndSetControlTargets(const RootFrameCommand& root_cmd)
+void DragonCopilot::transformAndSetControlTargets(const nav_msgs::Odometry& root_cmd)
 {
   if (!copilot_)
     return;

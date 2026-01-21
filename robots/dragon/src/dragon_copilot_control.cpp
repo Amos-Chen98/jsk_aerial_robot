@@ -70,7 +70,7 @@ DragonCopilotControl::DragonCopilotControl(boost::shared_ptr<aerial_robot_model:
   snake_max_joint_delta_ = max_copilot_rot_vel_ * loop_du_;
 }
 
-void DragonCopilotControl::updateControlState(const RootFrameCommand& root_cmd)
+void DragonCopilotControl::updateControlState(const nav_msgs::Odometry& root_cmd)
 {
   cacheFrameTransforms();
   cacheJacobians();
@@ -79,7 +79,7 @@ void DragonCopilotControl::updateControlState(const RootFrameCommand& root_cmd)
   getJoint1DqFromJoystick(root_cmd);
 }
 
-Eigen::VectorXd DragonCopilotControl::computeJointPositions(const RootFrameCommand& root_cmd)
+Eigen::VectorXd DragonCopilotControl::computeJointPositions(const nav_msgs::Odometry& root_cmd)
 {
   // Compute joint commands
   Eigen::VectorXd desired_joint_positions = Eigen::VectorXd::Zero(link_joint_num_);
@@ -93,7 +93,7 @@ Eigen::VectorXd DragonCopilotControl::computeJointPositions(const RootFrameComma
   }
 
   bool trajectory_ready = prepareTrajectoryData();
-  bool has_x_motion = (std::abs(root_cmd.x_vel) > 1e-6);
+  bool has_x_motion = (std::abs(root_cmd.twist.twist.linear.x) > 1e-6);
   joy_joint1_yaw_dq_ = joint1_dq_(1);
 
   if (has_x_motion && snake_mode_enabled_ && trajectory_ready && !snake_target_positions_world_.empty())
@@ -255,19 +255,19 @@ void DragonCopilotControl::cacheLastLinkTailJacobian()
   link_jacobians_linear_.push_back(linear_jacobian_tail);
 }
 
-void DragonCopilotControl::cacheRootFrameVelocities(const RootFrameCommand& root_cmd)
+void DragonCopilotControl::cacheRootFrameVelocities(const nav_msgs::Odometry& root_cmd)
 {
-  KDL::Vector root_vel_body(root_cmd.x_vel, root_cmd.y_vel, 0.0);
+  KDL::Vector root_vel_body(root_cmd.twist.twist.linear.x, root_cmd.twist.twist.linear.y, 0.0);
   root_vel_world_ = world_to_root_.M * root_vel_body;
-  root_vel_world_.z(root_vel_world_.z() + root_cmd.z_vel);
+  root_vel_world_.z(root_vel_world_.z() + root_cmd.twist.twist.linear.z);
   root_vel_world_eigen_ << root_vel_world_.x(), root_vel_world_.y(), root_vel_world_.z();
   root_omega_world_ = KDL::Vector::Zero();
 }
 
-void DragonCopilotControl::getJoint1DqFromJoystick(const RootFrameCommand& root_cmd)
+void DragonCopilotControl::getJoint1DqFromJoystick(const nav_msgs::Odometry& root_cmd)
 {
-  joint1_dq_(0) = std::clamp(root_cmd.pitch_vel * loop_du_, -snake_max_joint_delta_, snake_max_joint_delta_);
-  joint1_dq_(1) = std::clamp(-root_cmd.yaw_vel * loop_du_, -snake_max_joint_delta_, snake_max_joint_delta_);
+  joint1_dq_(0) = std::clamp(root_cmd.twist.twist.angular.y * loop_du_, -snake_max_joint_delta_, snake_max_joint_delta_);
+  joint1_dq_(1) = std::clamp(-root_cmd.twist.twist.angular.z * loop_du_, -snake_max_joint_delta_, snake_max_joint_delta_);
 
   accumulated_joint1_yaw_from_joy_ += joint1_dq_(1);
   accumulated_joint1_pitch_from_joy_ += joint1_dq_(0);
@@ -282,7 +282,7 @@ Eigen::Vector3d DragonCopilotControl::computeCoGVelocity() const
   return Eigen::Vector3d(des_cog_vel_world.x(), des_cog_vel_world.y(), des_cog_vel_world.z());
 }
 
-nav_msgs::Odometry DragonCopilotControl::computeBaselinkTargetPose(const RootFrameCommand& root_cmd) const
+nav_msgs::Odometry DragonCopilotControl::computeBaselinkTargetPose(const nav_msgs::Odometry& root_cmd) const
 {
   double des_baselink_r = 0.0;
   const double max_baselink_pitch = 1.5;
@@ -295,7 +295,7 @@ nav_msgs::Odometry DragonCopilotControl::computeBaselinkTargetPose(const RootFra
   if (link_joint_indices_.size() > 1 && link_joint_lower_limits_.size() > 1 && link_joint_upper_limits_.size() > 1)
   {
     double current_joint1_yaw = joint_positions_(link_joint_indices_[1]);
-    double yaw_vel_cmd = root_cmd.yaw_vel;
+    double yaw_vel_cmd = root_cmd.twist.twist.angular.z;
     double threshold = 0.02;
 
     if ((current_joint1_yaw >= link_joint_upper_limits_[1] - threshold && yaw_vel_cmd < 0.0) ||
