@@ -54,7 +54,7 @@ add_dependencies(dragon_aerial_robot_controllib aerial_robot_msgs_generate_messa
 add_library(dragon_navigation src/dragon_navigation.cpp)
 target_link_libraries(dragon_navigation ${catkin_LIBRARIES})
 
-add_library(dragon_copilot src/dragon_copilot.cpp)
+add_library(dragon_copilot src/dragon_copilot.cpp src/dragon_copilot_control.cpp)
 target_link_libraries(dragon_copilot dragon_navigation ${catkin_LIBRARIES})
 
 # generate symbolic link for desktop files
