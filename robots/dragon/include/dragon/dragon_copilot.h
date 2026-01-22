@@ -77,13 +77,24 @@ private:
   /**
    * @brief Parse joystick inputs and generate velocity/attitude commands
    *
-   * Reads joystick axes and converts them to velocity and attitude commands in root frame.
-   * Handles trigger initialization, deadzone processing, and command scaling.
+   * Reads joystick axes and converts them to velocity and attitude commands in FLU (Front-Left-Up)
+   * odometry frame. Handles trigger initialization, deadzone processing, and command scaling.
    *
    * @param joy_cmd Parsed joystick message
-   * @return nav_msgs::Odometry Odometry structure containing all control commands
+   * @return nav_msgs::Odometry Odometry structure containing commands in FLU frame
    */
   nav_msgs::Odometry parseJoystickInputs(const sensor_msgs::Joy& joy_cmd);
+
+  /**
+   * @brief Transform odometry commands from FLU frame to control command frame
+   *
+   * Converts velocity and attitude commands from FLU (Front-Left-Up) odometry frame 
+   * to the control command frame by inverting x, y, and pitch axes.
+   *
+   * @param root_odom Odometry commands in FLU frame
+   * @return nav_msgs::Odometry Commands in control frame
+   */
+  nav_msgs::Odometry transformOdomToCmd(const nav_msgs::Odometry& root_odom);
 
   /**
    * @brief Transform velocity commands from root frame to world frame and set control targets

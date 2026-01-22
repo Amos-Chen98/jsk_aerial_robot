@@ -211,8 +211,11 @@ void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
   if (!teleop_flag_)
     return;
 
-  /* Parse joystick inputs to get velocity and attitude commands */
-  nav_msgs::Odometry root_cmd = parseJoystickInputs(joy_cmd);
+  /* Parse joystick inputs to get velocity and attitude commands in FLU odometry frame */
+  nav_msgs::Odometry root_odom = parseJoystickInputs(joy_cmd);
+
+  /* Transform from odometry frame to control command frame */
+  nav_msgs::Odometry root_cmd = transformOdomToCmd(root_odom);
 
   /* Transform velocity commands and set control targets */
   transformAndSetControlTargets(root_cmd);
@@ -220,7 +223,7 @@ void DragonCopilot::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
 
 nav_msgs::Odometry DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& joy_cmd)
 {
-  nav_msgs::Odometry root_cmd;
+  nav_msgs::Odometry root_odom;
   // ---------- X-axis control (forward/backward) via R2/L2 triggers ----------
   // R2 trigger: forward (neutral=+1, full=-1, so we need to invert and normalize)
   // Handle initialization issue: ROS topic reports 0 until first press, then reports correctly
@@ -273,7 +276,7 @@ nav_msgs::Odometry DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& jo
   // Calculate net x velocity command
   // R2 (forward_cmd) -> positive X velocity (root frame forward direction)
   // L2 (backward_cmd) -> negative X velocity (root frame backward direction)
-  root_cmd.twist.twist.linear.x = (forward_cmd - backward_cmd) * copilot_params_.max_copilot_x_vel;
+  root_odom.twist.twist.linear.x = (forward_cmd - backward_cmd) * copilot_params_.max_copilot_x_vel;
 
   // ---------- Y-axis control via JOY_AXIS_STICK_RIGHT ----------
   // Right stick horizontal: lateral translation (y-axis)
@@ -282,7 +285,7 @@ nav_msgs::Odometry DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& jo
   /* Process Y-axis motion (lateral translation) */
   if (fabs(raw_y_cmd) > copilot_params_.joy_stick_deadzone)
   {
-    root_cmd.twist.twist.linear.y = raw_y_cmd * copilot_params_.max_copilot_y_vel;
+    root_odom.twist.twist.linear.y = raw_y_cmd * copilot_params_.max_copilot_y_vel;
   }
 
   // ---------- Z-axis control via JOY_AXIS_STICK_RIGHT ----------
@@ -292,7 +295,7 @@ nav_msgs::Odometry DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& jo
   /* Process Z-axis motion (vertical translation) */
   if (fabs(raw_z_cmd) > copilot_params_.joy_stick_deadzone)
   {
-    root_cmd.twist.twist.linear.z = raw_z_cmd * copilot_params_.max_copilot_z_vel;
+    root_odom.twist.twist.linear.z = raw_z_cmd * copilot_params_.max_copilot_z_vel;
   }
 
   // ---------- pitch control via JOY_AXIS_STICK_LEFT ----------
@@ -303,14 +306,14 @@ nav_msgs::Odometry DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& jo
   if (fabs(raw_pitch_cmd) > copilot_params_.joy_stick_deadzone)
   {
     // Active input: apply pitch velocity
-    root_cmd.twist.twist.angular.y = raw_pitch_cmd * copilot_params_.max_copilot_rot_vel;
+    root_odom.twist.twist.angular.y = raw_pitch_cmd * copilot_params_.max_copilot_rot_vel;
   }
   else if (copilot_params_.hold_attitude_on_idle)
   {
     // When no input and attitude hold is enabled, set pitch_vel to 0 (hold current attitude)
-    root_cmd.twist.twist.angular.y = 0.0;
+    root_odom.twist.twist.angular.y = 0.0;
   }
-  // else: root_cmd.pitch_vel remains 0.0 from constructor (will return to level flight)
+  // else: root_odom.pitch_vel remains 0.0 from constructor (will return to level flight)
 
   // ---------- yaw control via JOY_AXIS_STICK_LEFT ----------
   // Left stick horizontal: yaw rotation
@@ -319,15 +322,19 @@ nav_msgs::Odometry DragonCopilot::parseJoystickInputs(const sensor_msgs::Joy& jo
   /* Process Yaw motion (rotation around z-axis) */
   if (fabs(raw_yaw_cmd) > copilot_params_.joy_stick_deadzone)
   {
-    root_cmd.twist.twist.angular.z = raw_yaw_cmd * copilot_params_.max_copilot_rot_vel;
+    root_odom.twist.twist.angular.z = raw_yaw_cmd * copilot_params_.max_copilot_rot_vel;
   }
 
-  // Finally, revert x and y axis, so that the forward on joystick means forward along the head direction
-  // Also revert yaw so that stick right increases joint1_yaw
-  root_cmd.twist.twist.linear.x = -root_cmd.twist.twist.linear.x;
-  root_cmd.twist.twist.linear.y = -root_cmd.twist.twist.linear.y;
-  root_cmd.twist.twist.angular.y = -root_cmd.twist.twist.angular.y;
-  root_cmd.twist.twist.angular.z = root_cmd.twist.twist.angular.z;
+  return root_odom;
+}
+
+nav_msgs::Odometry DragonCopilot::transformOdomToCmd(const nav_msgs::Odometry& root_odom)
+{
+  nav_msgs::Odometry root_cmd = root_odom;
+  root_cmd.twist.twist.linear.x = -root_odom.twist.twist.linear.x;
+  root_cmd.twist.twist.linear.y = -root_odom.twist.twist.linear.y;
+  root_cmd.twist.twist.angular.y = -root_odom.twist.twist.angular.y;
+  root_cmd.twist.twist.angular.z = root_odom.twist.twist.angular.z;
 
   return root_cmd;
 }
