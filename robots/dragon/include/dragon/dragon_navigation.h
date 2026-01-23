@@ -42,6 +42,10 @@
 #include <sensor_msgs/JointState.h>
 #include <nav_msgs/Odometry.h>
 #include <spinal/DesireCoord.h>
+#include <aerial_robot_msgs/FullStateTarget.h>
+#include <aerial_robot_msgs/FlightNav.h>
+#include <aerial_robot_model/model/transformable_aerial_robot_model.h>
+#include <mutex>
 
 namespace aerial_robot_navigation
 {
@@ -63,8 +67,10 @@ namespace aerial_robot_navigation
   protected:
     ros::Publisher target_baselink_rpy_pub_; // to spinal
     ros::Publisher joint_control_pub_;
+    ros::Publisher flight_nav_pub_; // for CoG navigation commands
     ros::Subscriber final_target_baselink_rot_sub_, final_target_baselink_rpy_sub_;
     ros::Subscriber target_rotation_motion_sub_;
+    ros::Subscriber full_state_target_sub_;
 
     void halt() override;
     void reset() override;
@@ -78,6 +84,7 @@ namespace aerial_robot_navigation
     void targetBaselinkRotCallback(const geometry_msgs::QuaternionStampedConstPtr & msg);
     void targetBaselinkRPYCallback(const geometry_msgs::Vector3StampedConstPtr & msg);
     void targetRotationMotionCallback(const nav_msgs::OdometryConstPtr& msg);
+    void fullStateTargetCallback(const aerial_robot_msgs::FullStateTargetConstPtr& msg);
 
     /* target baselink rotation */
     double prev_rotation_stamp_;
@@ -94,6 +101,11 @@ namespace aerial_robot_navigation
     string joints_torque_control_srv_name_, gimbals_torque_control_srv_name_;
     double baselink_rot_change_thresh_;
     double baselink_rot_pub_interval_;
+
+    /* full state target */
+    int link_joint_num_;
+    std::vector<int> link_joint_indices_;
+    std::mutex cog_calculation_mutex_; // Protect temporary robot model updates during CoG calculation
 
     // addtional state 
     static constexpr uint8_t PRE_LAND_STATE = 0x20;

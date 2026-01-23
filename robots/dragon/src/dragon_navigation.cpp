@@ -23,11 +23,27 @@ void DragonNavigator::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
 
   target_baselink_rpy_pub_ = nh_.advertise<spinal::DesireCoord>("desire_coordinate", 1); // to spinal
   joint_control_pub_ = nh_.advertise<sensor_msgs::JointState>("joints_ctrl", 1);
+  flight_nav_pub_ = nh_.advertise<aerial_robot_msgs::FlightNav>("uav/nav", 1);
   final_target_baselink_rot_sub_ = nh_.subscribe("final_target_baselink_rot", 1, &DragonNavigator::targetBaselinkRotCallback, this);
   final_target_baselink_rpy_sub_ = nh_.subscribe("final_target_baselink_rpy", 1, &DragonNavigator::targetBaselinkRPYCallback, this);
   target_rotation_motion_sub_ = nh_.subscribe("target_rotation_motion", 1, &DragonNavigator::targetRotationMotionCallback, this);
+  full_state_target_sub_ = nh_.subscribe("full_state_target", 1, &DragonNavigator::fullStateTargetCallback, this);
 
   prev_rotation_stamp_ = ros::Time::now().toSec();
+
+  // Initialize link joint information
+  auto transformable_model = boost::dynamic_pointer_cast<aerial_robot_model::transformable::RobotModel>(robot_model_);
+  if (transformable_model)
+  {
+    link_joint_indices_ = transformable_model->getLinkJointIndices();
+    link_joint_num_ = link_joint_indices_.size();
+    ROS_INFO("[DragonNavigator] Link joint indices initialized: %d joints", link_joint_num_);
+  }
+  else
+  {
+    link_joint_num_ = 0;
+    ROS_WARN("[DragonNavigator] Failed to cast to transformable robot model");
+  }
 }
 
 void DragonNavigator::update()
@@ -346,6 +362,78 @@ void DragonNavigator::halt()
     ROS_INFO("dragon control halt process: disable the gimbal torque");
   else
     ROS_ERROR("Failed to call service %s", gimbals_torque_control_srv_name_.c_str());
+}
+
+void DragonNavigator::fullStateTargetCallback(const aerial_robot_msgs::FullStateTargetConstPtr& msg)
+{
+  // Validate joint state size
+  if (link_joint_num_ > 0 && msg->joint_state.position.size() != link_joint_num_)
+  {
+    ROS_ERROR("[DragonNavigator] Joint state size mismatch: expected %d, got %zu", link_joint_num_,
+              msg->joint_state.position.size());
+    return;
+  }
+
+  KDL::JntArray current_joint_positions = robot_model_->getJointPositions();
+
+  KDL::JntArray updated_joint_positions = current_joint_positions;
+  for (size_t i = 0; i < link_joint_num_; ++i)
+  {
+    int joint_index = link_joint_indices_[i];
+    updated_joint_positions(joint_index) = msg->joint_state.position[i];
+  }
+
+  // Use mutex to protect temporary robot model update and restore
+  // This ensures thread-safety if other callbacks or update() access robot_model_ simultaneously
+  KDL::Frame cog_frame;
+  {
+    std::lock_guard<std::mutex> lock(cog_calculation_mutex_);
+    robot_model_->updateRobotModel(updated_joint_positions);
+    cog_frame = robot_model_->getCog<KDL::Frame>();
+    robot_model_->updateRobotModel(current_joint_positions);
+  }
+
+  tf::Vector3 root_pos;
+  tf::pointMsgToTF(msg->root_state.pose.pose.position, root_pos);
+  tf::Quaternion root_rot;
+  tf::quaternionMsgToTF(msg->root_state.pose.pose.orientation, root_rot);
+
+  KDL::Frame root_frame_kdl;
+  root_frame_kdl.p = KDL::Vector(root_pos.x(), root_pos.y(), root_pos.z());
+  root_frame_kdl.M = KDL::Rotation::Quaternion(root_rot.x(), root_rot.y(), root_rot.z(), root_rot.w());
+
+  KDL::Frame world_cog_frame = root_frame_kdl * cog_frame;
+
+  tf::Vector3 cog_pos(world_cog_frame.p.x(), world_cog_frame.p.y(), world_cog_frame.p.z());
+
+  double qx, qy, qz, qw;
+  world_cog_frame.M.GetQuaternion(qx, qy, qz, qw);
+  tf::Quaternion cog_rot(qx, qy, qz, qw);
+
+  double r, p, y;
+  tf::Matrix3x3(cog_rot).getRPY(r, p, y);
+
+  // Publish CoG navigation command via FlightNav message
+  aerial_robot_msgs::FlightNav nav_msg;
+  nav_msg.header.stamp = ros::Time::now();
+  nav_msg.header.frame_id = "world";
+  nav_msg.target = aerial_robot_msgs::FlightNav::COG;
+  nav_msg.control_frame = aerial_robot_msgs::FlightNav::WORLD_FRAME;
+  nav_msg.pos_xy_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
+  nav_msg.pos_z_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
+  nav_msg.yaw_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
+
+  nav_msg.target_pos_x = cog_pos.x();
+  nav_msg.target_pos_y = cog_pos.y();
+  nav_msg.target_pos_z = cog_pos.z();
+  nav_msg.target_yaw = y;
+
+  flight_nav_pub_.publish(nav_msg);
+
+  // Publish joint control commands
+  sensor_msgs::JointState joint_control_msg;
+  joint_control_msg.position = msg->joint_state.position;
+  joint_control_pub_.publish(joint_control_msg);
 }
 
 void DragonNavigator::rosParamInit()
