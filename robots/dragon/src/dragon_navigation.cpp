@@ -24,6 +24,7 @@ void DragonNavigator::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
   target_baselink_rpy_pub_ = nh_.advertise<spinal::DesireCoord>("desire_coordinate", 1); // to spinal
   joint_control_pub_ = nh_.advertise<sensor_msgs::JointState>("joints_ctrl", 1);
   flight_nav_pub_ = nh_.advertise<aerial_robot_msgs::FlightNav>("uav/nav", 1);
+  root_target_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("root_target_pose", 1);
   final_target_baselink_rot_sub_ = nh_.subscribe("final_target_baselink_rot", 1, &DragonNavigator::targetBaselinkRotCallback, this);
   final_target_baselink_rpy_sub_ = nh_.subscribe("final_target_baselink_rpy", 1, &DragonNavigator::targetBaselinkRPYCallback, this);
   target_rotation_motion_sub_ = nh_.subscribe("target_rotation_motion", 1, &DragonNavigator::targetRotationMotionCallback, this);
@@ -429,6 +430,19 @@ void DragonNavigator::fullStateTargetCallback(const aerial_robot_msgs::FullState
   nav_msg.target_yaw = y;
 
   flight_nav_pub_.publish(nav_msg);
+
+  // Publish root target pose
+  geometry_msgs::PoseStamped root_pose_msg;
+  root_pose_msg.header.stamp = ros::Time::now();
+  root_pose_msg.header.frame_id = "world";
+  root_pose_msg.pose.position.x = root_pos.x();
+  root_pose_msg.pose.position.y = root_pos.y();
+  root_pose_msg.pose.position.z = root_pos.z();
+  root_pose_msg.pose.orientation.x = root_rot.x();
+  root_pose_msg.pose.orientation.y = root_rot.y();
+  root_pose_msg.pose.orientation.z = root_rot.z();
+  root_pose_msg.pose.orientation.w = root_rot.w();
+  root_target_pose_pub_.publish(root_pose_msg);
 
   // Publish joint control commands
   sensor_msgs::JointState joint_control_msg;
