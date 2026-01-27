@@ -1,0 +1,9 @@
+# Key states for dragon robot trajectory
+# Each key state:  root link pose + 6 joint angles
+# [x, y, z, roll, pitch, yaw, joint1, joint2, joint3, joint4, joint5, joint6]
+
+key_states:
+  - [2.0, 0.0, 1.5, 0.0, 0.0, 0.0, 0.0, 1.57, 0.0, 1.57, 0.0, 1.57]
+  - [2.0, 2.0, 1.5, 0.0, 0.0, 1.57, 0.0, 0.5, 0.0, 0.5, 0.0, 0.5]
+  - [0.0, 2.0, 1.5, 0.0, 0.0, 3.14, 0.0, 1.57, 0.0, 1.57, 0.0, 1.57]
+  - [0.0, 0.0, 1.5, 0.0, 0.0, 4.71, 0.0, 0.5, 0.0, 0.5, 0.0, 0.5]
