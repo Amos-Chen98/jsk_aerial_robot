@@ -1,17 +1,8 @@
-/*
- * Full State Trajectory Demo for Dragon Robot
- * 
- * This node demonstrates MINCO trajectory generation for dragon robot control.
- * It generates a continuous trajectory through predefined key states and publishes
- * full state target commands to control the robot.
- */
-
 #include <ros/ros.h>
 #include <aerial_robot_msgs/FullStateTarget.h>
 #include <geometry_msgs/PoseStamped.h>
 #include <sensor_msgs/JointState.h>
 #include <tf/tf.h>
-#include <tf/transform_listener.h>
 #include <Eigen/Eigen>
 #include "aerial_robot_control/minco_trajectory/minco.hpp"
 #include "aerial_robot_control/minco_trajectory/trajectory.hpp"
@@ -53,6 +44,24 @@ public:
   void jointStateCallback(const sensor_msgs::JointStateConstPtr& msg)
   {
     current_joint_state_ = *msg;
+    
+    // Initialize link_joint_indices_ on first callback
+    if (link_joint_indices_.empty() && !msg->name.empty())
+    {
+      for (size_t i = 0; i < msg->name.size(); i++)
+      {
+        const std::string& joint_name = msg->name[i];
+        // Link joints are named like "joint1_pitch", "joint1_yaw", etc.
+        if (joint_name.find("joint") != std::string::npos && 
+            (joint_name.find("pitch") != std::string::npos || 
+             joint_name.find("yaw") != std::string::npos))
+        {
+          link_joint_indices_.push_back(i);
+        }
+      }
+      ROS_INFO("[FullStateTraj] Detected %zu link joints", link_joint_indices_.size());
+    }
+    
     has_joint_state_ = true;
   }
   
@@ -334,6 +343,7 @@ private:
   double control_frequency_;
   double segment_time_;
   int joint_num_;
+  std::vector<int> link_joint_indices_;
   
   geometry_msgs::PoseStamped current_root_pose_;
   sensor_msgs::JointState current_joint_state_;
@@ -368,10 +378,14 @@ private:
     state[4] = pitch;
     state[5] = yaw;
     
-    // Joint states (extract link joint positions)
-    for (int i = 0; i < std::min(joint_num_, (int)current_joint_state_.position.size()); i++)
+    // Joint states (extract link joint positions using indices)
+    for (int i = 0; i < std::min(joint_num_, (int)link_joint_indices_.size()); i++)
     {
-      state[6 + i] = current_joint_state_.position[i];
+      int joint_idx = link_joint_indices_[i];
+      if (joint_idx < (int)current_joint_state_.position.size())
+      {
+        state[6 + i] = current_joint_state_.position[joint_idx];
+      }
     }
     
     return state;
