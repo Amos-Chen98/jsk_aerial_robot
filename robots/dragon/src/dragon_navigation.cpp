@@ -25,6 +25,7 @@ void DragonNavigator::initialize(ros::NodeHandle nh, ros::NodeHandle nhp,
   joint_control_pub_ = nh_.advertise<sensor_msgs::JointState>("joints_ctrl", 1);
   flight_nav_pub_ = nh_.advertise<aerial_robot_msgs::FlightNav>("uav/nav", 1);
   root_target_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("root_target_pose", 1);
+  target_rotation_motion_pub_ = nh_.advertise<nav_msgs::Odometry>("target_rotation_motion", 1);
   final_target_baselink_rot_sub_ = nh_.subscribe("final_target_baselink_rot", 1, &DragonNavigator::targetBaselinkRotCallback, this);
   final_target_baselink_rpy_sub_ = nh_.subscribe("final_target_baselink_rpy", 1, &DragonNavigator::targetBaselinkRPYCallback, this);
   target_rotation_motion_sub_ = nh_.subscribe("target_rotation_motion", 1, &DragonNavigator::targetRotationMotionCallback, this);
@@ -414,22 +415,37 @@ void DragonNavigator::fullStateTargetCallback(const aerial_robot_msgs::FullState
   double r, p, y;
   tf::Matrix3x3(cog_rot).getRPY(r, p, y);
 
-  // Publish CoG navigation command via FlightNav message
-  aerial_robot_msgs::FlightNav nav_msg;
-  nav_msg.header.stamp = ros::Time::now();
-  nav_msg.header.frame_id = "world";
-  nav_msg.target = aerial_robot_msgs::FlightNav::COG;
-  nav_msg.control_frame = aerial_robot_msgs::FlightNav::WORLD_FRAME;
-  nav_msg.pos_xy_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
-  nav_msg.pos_z_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
-  nav_msg.yaw_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
+  // CoG 3D position
+  aerial_robot_msgs::FlightNav cog_pos_msg;
+  cog_pos_msg.header.stamp = ros::Time::now();
+  cog_pos_msg.header.frame_id = "world";
+  cog_pos_msg.target = aerial_robot_msgs::FlightNav::COG;
+  cog_pos_msg.control_frame = aerial_robot_msgs::FlightNav::WORLD_FRAME;
+  cog_pos_msg.pos_xy_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
+  cog_pos_msg.pos_z_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
+  cog_pos_msg.yaw_nav_mode = aerial_robot_msgs::FlightNav::NO_NAVIGATION; // Yaw is controlled by target_rotation_motion  
 
-  nav_msg.target_pos_x = cog_pos.x();
-  nav_msg.target_pos_y = cog_pos.y();
-  nav_msg.target_pos_z = cog_pos.z();
-  nav_msg.target_yaw = y;
+  cog_pos_msg.target_pos_x = cog_pos.x();
+  cog_pos_msg.target_pos_y = cog_pos.y();
+  cog_pos_msg.target_pos_z = cog_pos.z();
 
-  flight_nav_pub_.publish(nav_msg);
+  flight_nav_pub_.publish(cog_pos_msg);
+
+  // CoG 3D orientation
+  nav_msgs::Odometry cog_rotation_msg;
+  cog_rotation_msg.header.stamp = ros::Time::now();
+  cog_rotation_msg.header.frame_id = "cog"; // Using CoG frame
+  
+  cog_rotation_msg.pose.pose.orientation.x = cog_rot.x();
+  cog_rotation_msg.pose.pose.orientation.y = cog_rot.y();
+  cog_rotation_msg.pose.pose.orientation.z = cog_rot.z();
+  cog_rotation_msg.pose.pose.orientation.w = cog_rot.w();
+  
+  cog_rotation_msg.twist.twist.angular.x = 0.0;
+  cog_rotation_msg.twist.twist.angular.y = 0.0;
+  cog_rotation_msg.twist.twist.angular.z = 0.0;
+  
+  target_rotation_motion_pub_.publish(cog_rotation_msg);
 
   // Publish root target pose
   geometry_msgs::PoseStamped root_pose_msg;

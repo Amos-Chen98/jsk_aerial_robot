@@ -69,6 +69,7 @@ namespace aerial_robot_navigation
     ros::Publisher joint_control_pub_;
     ros::Publisher flight_nav_pub_; // for CoG navigation commands
     ros::Publisher root_target_pose_pub_; // for root pose target
+    ros::Publisher target_rotation_motion_pub_; // for full CoG/baselink orientation control
     ros::Subscriber final_target_baselink_rot_sub_, final_target_baselink_rpy_sub_;
     ros::Subscriber target_rotation_motion_sub_;
     ros::Subscriber full_state_target_sub_;
