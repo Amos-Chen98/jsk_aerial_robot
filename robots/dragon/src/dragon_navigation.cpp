@@ -400,6 +400,11 @@ void DragonNavigator::fullStateTargetCallback(const aerial_robot_msgs::FullState
   tf::Quaternion root_rot;
   tf::quaternionMsgToTF(msg->root_state.pose.pose.orientation, root_rot);
 
+  tf::Vector3 root_vel;
+  tf::vector3MsgToTF(msg->root_state.twist.twist.linear, root_vel);
+  tf::Vector3 root_omega;
+  tf::vector3MsgToTF(msg->root_state.twist.twist.angular, root_omega);
+
   KDL::Frame root_frame_kdl;
   root_frame_kdl.p = KDL::Vector(root_pos.x(), root_pos.y(), root_pos.z());
   root_frame_kdl.M = KDL::Rotation::Quaternion(root_rot.x(), root_rot.y(), root_rot.z(), root_rot.w());
@@ -412,26 +417,36 @@ void DragonNavigator::fullStateTargetCallback(const aerial_robot_msgs::FullState
   world_cog_frame.M.GetQuaternion(qx, qy, qz, qw);
   tf::Quaternion cog_rot(qx, qy, qz, qw);
 
+  // v_cog = v_root + omega_root × (p_cog - p_root)
+  tf::Vector3 cog_rel_pos = cog_pos - root_pos;
+  tf::Vector3 cog_vel = root_vel + root_omega.cross(cog_rel_pos);
+  tf::Vector3 cog_omega = root_omega;
+
   double r, p, y;
   tf::Matrix3x3(cog_rot).getRPY(r, p, y);
 
-  // CoG 3D position
+  // CoG position + CoG orientation + joint control commands fully define the full state target
+  // CoG position
   aerial_robot_msgs::FlightNav cog_pos_msg;
   cog_pos_msg.header.stamp = ros::Time::now();
   cog_pos_msg.header.frame_id = "world";
   cog_pos_msg.target = aerial_robot_msgs::FlightNav::COG;
   cog_pos_msg.control_frame = aerial_robot_msgs::FlightNav::WORLD_FRAME;
-  cog_pos_msg.pos_xy_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
-  cog_pos_msg.pos_z_nav_mode = aerial_robot_msgs::FlightNav::POS_MODE;
+  cog_pos_msg.pos_xy_nav_mode = aerial_robot_msgs::FlightNav::POS_VEL_MODE;
+  cog_pos_msg.pos_z_nav_mode = aerial_robot_msgs::FlightNav::POS_VEL_MODE;
   cog_pos_msg.yaw_nav_mode = aerial_robot_msgs::FlightNav::NO_NAVIGATION; // Yaw is controlled by target_rotation_motion  
 
   cog_pos_msg.target_pos_x = cog_pos.x();
   cog_pos_msg.target_pos_y = cog_pos.y();
   cog_pos_msg.target_pos_z = cog_pos.z();
 
+  cog_pos_msg.target_vel_x = cog_vel.x();
+  cog_pos_msg.target_vel_y = cog_vel.y();
+  cog_pos_msg.target_vel_z = cog_vel.z();
+
   flight_nav_pub_.publish(cog_pos_msg);
 
-  // CoG 3D orientation
+  // CoG orientation
   nav_msgs::Odometry cog_rotation_msg;
   cog_rotation_msg.header.stamp = ros::Time::now();
   cog_rotation_msg.header.frame_id = "cog"; // Using CoG frame
@@ -441,13 +456,18 @@ void DragonNavigator::fullStateTargetCallback(const aerial_robot_msgs::FullState
   cog_rotation_msg.pose.pose.orientation.z = cog_rot.z();
   cog_rotation_msg.pose.pose.orientation.w = cog_rot.w();
   
-  cog_rotation_msg.twist.twist.angular.x = 0.0;
-  cog_rotation_msg.twist.twist.angular.y = 0.0;
-  cog_rotation_msg.twist.twist.angular.z = 0.0;
+  cog_rotation_msg.twist.twist.angular.x = cog_omega.x();
+  cog_rotation_msg.twist.twist.angular.y = cog_omega.y();
+  cog_rotation_msg.twist.twist.angular.z = cog_omega.z();
   
   target_rotation_motion_pub_.publish(cog_rotation_msg);
 
-  // Publish root target pose
+  // Publish joint control commands
+  sensor_msgs::JointState joint_control_msg;
+  joint_control_msg.position = msg->joint_state.position;
+  joint_control_pub_.publish(joint_control_msg);
+
+  // Publish root target pose (only for reference)
   geometry_msgs::PoseStamped root_pose_msg;
   root_pose_msg.header.stamp = ros::Time::now();
   root_pose_msg.header.frame_id = "world";
@@ -459,11 +479,6 @@ void DragonNavigator::fullStateTargetCallback(const aerial_robot_msgs::FullState
   root_pose_msg.pose.orientation.z = root_rot.z();
   root_pose_msg.pose.orientation.w = root_rot.w();
   root_target_pose_pub_.publish(root_pose_msg);
-
-  // Publish joint control commands
-  sensor_msgs::JointState joint_control_msg;
-  joint_control_msg.position = msg->joint_state.position;
-  joint_control_pub_.publish(joint_control_msg);
 }
 
 void DragonNavigator::rosParamInit()
