@@ -213,8 +213,9 @@ public:
     {
       double elapsed_time = idx * dt;
       
-      // Get position from trajectory at current time
+      // Get position and velocity from trajectory at current time
       Eigen::Vector3d pos = trajectory_.getPos(elapsed_time);
+      Eigen::Vector3d vel = trajectory_.getVel(elapsed_time);
       
       // Interpolate orientation and joint states
       int piece_idx = findPieceIndex(elapsed_time);
@@ -247,10 +248,11 @@ public:
       msg.root_state.pose.pose.orientation.z = q.z();
       msg.root_state.pose.pose.orientation.w = q.w();
       
-      // Set velocity to zero (position control)
-      msg.root_state.twist.twist.linear.x = 0.0;
-      msg.root_state.twist.twist.linear.y = 0.0;
-      msg.root_state.twist.twist.linear.z = 0.0;
+      // Set linear velocity from trajectory
+      msg.root_state.twist.twist.linear.x = vel.x();
+      msg.root_state.twist.twist.linear.y = vel.y();
+      msg.root_state.twist.twist.linear.z = vel.z();
+      
       msg.root_state.twist.twist.angular.x = 0.0;
       msg.root_state.twist.twist.angular.y = 0.0;
       msg.root_state.twist.twist.angular.z = 0.0;
