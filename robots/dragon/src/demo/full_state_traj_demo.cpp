@@ -19,7 +19,7 @@ public:
     
     // Initialize publishers and subscribers
     full_state_target_pub_ = nh_.advertise<aerial_robot_msgs::FullStateTarget>("/dragon/full_state_target", 10);
-    root_pose_sub_ = nh_.subscribe("/dragon/root_pose", 10, &FullStateTraj::rootPoseCallback, this);
+    root_pose_sub_ = nh_.subscribe("/dragon/root/pose", 10, &FullStateTraj::rootPoseCallback, this);
     joint_state_sub_ = nh_.subscribe("/dragon/joint_states", 10, &FullStateTraj::jointStateCallback, this);
     
     // Create timer for trajectory publishing

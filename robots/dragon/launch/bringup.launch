@@ -125,9 +125,6 @@
     <arg name="mujoco_model" value="$(find dragon)/mujoco/$(arg link_num)/$(arg model_name)$(arg suffix)/robot.xml"/>
   </include>
 
-  ########## Dragon Root Pose Publisher #########
-  <node pkg="dragon" type="dragon_root_pose_publisher.py" name="dragon_root_pose_publisher" ns="$(arg robot_ns)" output="screen" />
-
   ########## Simple Demo #########
   <node pkg="dragon" type="simple_demo.py" name="simple_demo" ns="$(arg robot_ns)" output="screen" if="$(arg demo)"/>
 
