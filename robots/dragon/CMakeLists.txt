@@ -73,6 +73,9 @@ target_link_libraries(root_3D_traj_demo ${catkin_LIBRARIES})
 add_dependencies(root_3D_traj_demo aerial_robot_msgs_generate_messages_cpp)
 
 # Copilot nodes
+add_executable(copilot_planner src/copilot/copilot_planner.cpp)
+target_link_libraries(copilot_planner ${catkin_LIBRARIES})
+add_dependencies(copilot_planner aerial_robot_msgs_generate_messages_cpp)
 
 # generate symbolic link for desktop files
 add_custom_target(${PROJECT_NAME}_install_desktop ALL COMMAND ${PROJECT_SOURCE_DIR}/bin/desktop/desktop_install.sh)
@@ -88,7 +91,7 @@ target_link_libraries(dragon_jacobian_test dragon_numerical_jacobians ${catkin_L
 install(DIRECTORY include/${PROJECT_NAME}/ test/${PROJECT_NAME}/
   DESTINATION ${CATKIN_PACKAGE_INCLUDE_DESTINATION})
 
-install(TARGETS dragon_jacobian_test full_state_traj_demo root_6D_traj_demo root_3D_traj_demo
+install(TARGETS dragon_jacobian_test full_state_traj_demo root_6D_traj_demo root_3D_traj_demo copilot_planner
   DESTINATION ${CATKIN_PACKAGE_BIN_DESTINATION}
 )
 
