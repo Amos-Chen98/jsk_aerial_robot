@@ -2,4 +2,7 @@
   <class name="aerial_robot_navigation/dragon_navigation" type="aerial_robot_navigation::DragonNavigator" base_class_type="aerial_robot_navigation::BaseNavigator">
     <description> dragon navigation plugin</description>
   </class>
+  <class name="aerial_robot_navigation/dragon_root_target_navigation" type="aerial_robot_navigation::DragonRootTargetNavigator" base_class_type="aerial_robot_navigation::BaseNavigator">
+    <description>dragon navigation plugin with joystick-driven root/target_pose teleop</description>
+  </class>
 </library>

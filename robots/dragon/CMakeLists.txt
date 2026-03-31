@@ -51,7 +51,7 @@ add_library(dragon_aerial_robot_controllib src/control/lqi_gimbal_control.cpp sr
 target_link_libraries (dragon_aerial_robot_controllib dragon_robot_model dragon_navigation dragon_sensor_pluginlib ${catkin_LIBRARIES} ${Eigen3_LIBRARIES})
 add_dependencies(dragon_aerial_robot_controllib aerial_robot_msgs_generate_messages_cpp)
 
-add_library(dragon_navigation src/dragon_navigation.cpp)
+add_library(dragon_navigation src/dragon_navigation.cpp src/dragon_root_target_navigation.cpp)
 target_link_libraries(dragon_navigation ${catkin_LIBRARIES})
 
 # Demo nodes
@@ -109,4 +109,3 @@ if(CATKIN_ENABLE_TESTING)
   find_package(rostest REQUIRED)
   add_subdirectory(test)
 endif()
-
