@@ -1,0 +1,84 @@
+<?xml version="1.0"?>
+<robot
+    xmlns:xacro="http://www.ros.org/wiki/xacro" name="dji_on_dragon" >
+
+  <xacro:macro name="dji_on_dragon_module">
+    <!-- DJI Osmo Action 4 on Dragon -->
+    <xacro:extra_module name = "dji_on_dragon" parent = "link1" visible = "1"
+                        model_url = "package://dragon/urdf/v1_5/mesh/sensor/dji_on_dragon.STL"
+                        visual_z = "-0.017" >
+      <origin xyz="0.375 0.0 0.0" rpy="0 0 0"/>
+      <inertial>
+        <origin xyz="-0.0004129 0.0034570 0.0616466" rpy="0 0 0"/>
+        <mass value="0.1871"/>
+        <inertia
+            ixx="0.0002026" iyy="0.0001304" izz="0.0000988"
+            ixy="-0.0000017" ixz="0.0000013" iyz="0.0000104"/>
+      </inertial>
+    </xacro:extra_module>
+
+    <xacro:extra_module name = "dji_camera_frame" parent = "dji_on_dragon" visible = "0" >
+      <origin xyz="0 -0.017 0.075" rpy="0 0 ${pi}"/>
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="0.00001"/>
+        <inertia
+            ixx="0.000001" iyy="0.000001" izz="0.000001"
+            ixy="0.0" ixz="0.0" iyz="0.0"/>
+      </inertial>
+    </xacro:extra_module>
+
+    <xacro:extra_module name = "dji_camera_optical_frame" parent = "dji_camera_frame" visible = "0" >
+      <origin xyz="0 0 0" rpy="${-pi / 2} 0 ${-pi / 2}"/>
+      <inertial>
+        <origin xyz="0 0 0" rpy="0 0 0"/>
+        <mass value="0.00001"/>
+        <inertia
+            ixx="0.000001" iyy="0.000001" izz="0.000001"
+            ixy="0.0" ixz="0.0" iyz="0.0"/>
+      </inertial>
+    </xacro:extra_module>
+  </xacro:macro>
+
+  <xacro:macro name="dji_camera_gazebo" params="robot_name">
+    <gazebo reference="dji_camera_frame">
+      <sensor type="camera" name="dji_camera_sensor">
+        <always_on>true</always_on>
+        <update_rate>20.0</update_rate>
+        <camera name="dji_camera">
+          <horizontal_fov>1.8849555921538759</horizontal_fov>
+          <image>
+            <width>1280</width>
+            <height>720</height>
+            <format>R8G8B8</format>
+          </image>
+          <clip>
+            <near>0.02</near>
+            <far>300</far>
+          </clip>
+          <noise>
+            <type>gaussian</type>
+            <mean>0.0</mean>
+            <stddev>0.007</stddev>
+          </noise>
+        </camera>
+        <plugin name="dji_camera_controller" filename="libgazebo_ros_camera.so">
+          <robotNamespace>${robot_name}</robotNamespace>
+          <alwaysOn>true</alwaysOn>
+          <updateRate>0.0</updateRate>
+          <cameraName>dji_camera</cameraName>
+          <imageTopicName>image_raw</imageTopicName>
+          <cameraInfoTopicName>camera_info</cameraInfoTopicName>
+          <frameName>dji_camera_optical_frame</frameName>
+          <hackBaseline>0.0</hackBaseline>
+          <distortionK1>0.0</distortionK1>
+          <distortionK2>0.0</distortionK2>
+          <distortionK3>0.0</distortionK3>
+          <distortionT1>0.0</distortionT1>
+          <distortionT2>0.0</distortionT2>
+        </plugin>
+      </sensor>
+    </gazebo>
+  </xacro:macro>
+
+</robot>

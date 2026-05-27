@@ -14,6 +14,10 @@
   <arg name="battery" default="true" />
   <arg name="suffix" value="" if="$(arg battery)" />
   <arg name="suffix" value="_no_bat" unless="$(arg battery)" />
+  <arg name="dji_on" default="false" />
+  <arg name="robot_model_suffix" value="$(arg suffix)" unless="$(eval arg('new_model') and arg('dji_on'))" />
+  <arg name="robot_model_suffix" value="_dji_on" if="$(eval arg('new_model') and arg('dji_on') and arg('battery'))" />
+  <arg name="robot_model_suffix" value="_dji_on_no_bat" if="$(eval arg('new_model') and arg('dji_on') and not arg('battery'))" />
   <arg name="estimate_mode"  default= "1" />
   <arg name="sim_estimate_mode"  default= "2" />
   <arg name="takeoff_height"  default= "0" />
@@ -86,7 +90,7 @@
   <arg name="description_mode" value="gazebo" if="$(arg simulation)" />
   <include file="$(find aerial_robot_model)/launch/aerial_robot_model.launch" >
     <arg name="headless" value="$(arg headless)" />
-    <arg name="robot_model" value="$(find dragon)/robots/$(arg link_num)/$(arg model_name)$(arg suffix).$(arg description_mode).xacro" unless="$(arg direct_model)"/>
+    <arg name="robot_model" value="$(find dragon)/robots/$(arg link_num)/$(arg model_name)$(arg robot_model_suffix).$(arg description_mode).xacro" unless="$(arg direct_model)"/>
     <arg name="robot_model" value="$(arg direct_model_name)" if="$(arg direct_model)"/>
     <arg name="robot_ns" value="$(arg robot_ns)" />
     <arg name="rviz_config" value="$(find dragon)/config/rviz_config" />
