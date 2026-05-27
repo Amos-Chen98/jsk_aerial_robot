@@ -43,6 +43,43 @@ namespace
   {
     return (std::fabs(corrected_raw - 1.0) <= epsilon) ? corrected_raw : 1.0;
   }
+
+  void suppressBaseNavigatorModeSwitches(sensor_msgs::Joy& joy_msg)
+  {
+    const size_t axes_size = joy_msg.axes.size();
+    const size_t buttons_size = joy_msg.buttons.size();
+
+    if (axes_size == PS3_AXIS_SIZE && buttons_size == PS3_BUTTON_SIZE)
+      {
+        joy_msg.buttons[JOY_BUTTON_CROSS_DOWN] = 0;
+        joy_msg.buttons[JOY_BUTTON_ACTION_TRIANGLE] = 0;
+        joy_msg.buttons[JOY_BUTTON_ACTION_CROSS] = 0;
+        return;
+      }
+
+    if (axes_size == PS4_AXIS_SIZE && buttons_size == PS4_BUTTON_SIZE)
+      {
+        if(joy_msg.axes[PS4_AXIS_BUTTON_CROSS_UP_DOWN] < 0.0) joy_msg.axes[PS4_AXIS_BUTTON_CROSS_UP_DOWN] = 0.0;
+        joy_msg.buttons[PS4_BUTTON_ACTION_TRIANGLE] = 0;
+        joy_msg.buttons[PS4_BUTTON_ACTION_CROSS] = 0;
+        return;
+      }
+
+    if (axes_size == BLT_AXIS_SIZE && buttons_size == BLT_BUTTON_SIZE)
+      {
+        if(joy_msg.axes[BLT_AXIS_BUTTON_CROSS_UP_DOWN] < 0.0) joy_msg.axes[BLT_AXIS_BUTTON_CROSS_UP_DOWN] = 0.0;
+        joy_msg.buttons[BLT_BUTTON_ACTION_TRIANGLE] = 0;
+        joy_msg.buttons[BLT_BUTTON_ACTION_CROSS] = 0;
+        return;
+      }
+
+    if (axes_size == ROG1_AXIS_SIZE && buttons_size == ROG1_BUTTON_SIZE)
+      {
+        if(joy_msg.axes[ROG1_AXIS_BUTTON_CROSS_UP_DOWN] < 0.0) joy_msg.axes[ROG1_AXIS_BUTTON_CROSS_UP_DOWN] = 0.0;
+        joy_msg.buttons[ROG1_BUTTON_ACTION_Y] = 0;
+        joy_msg.buttons[ROG1_BUTTON_ACTION_A] = 0;
+      }
+  }
 }
 
 namespace aerial_robot_navigation
@@ -52,6 +89,7 @@ namespace aerial_robot_navigation
     has_root_tail_pose_(false),
     root_target_initialized_(false),
     root_target_command_active_(false),
+    root_target_joint_reset_combo_pressed_(false),
     l2_trigger_initialized_(false),
     r2_trigger_initialized_(false),
     root_target_deadzone_(0.0),
@@ -81,6 +119,7 @@ namespace aerial_robot_navigation
 
     root_tail_pose_sub_ = nh_.subscribe("root/tail_pose", 1, &DragonRootTargetNavigator::rootTailPoseCallback, this);
     root_target_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("root/target_pose", 1);
+    root_target_joint_reset_pub_ = nh_.advertise<sensor_msgs::JointState>("joints_ctrl", 1);
 
     ros::NodeHandle navi_nh(nh_, "navigation");
     navi_nh.param("root_target_deadzone", root_target_deadzone_, joy_stick_deadzone_);
@@ -140,6 +179,8 @@ namespace aerial_robot_navigation
 
   void DragonRootTargetNavigator::joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg)
   {
+    if(handleJointResetCombo(*joy_msg)) return;
+
     sensor_msgs::Joy sanitized_raw;
     double raw_yaw = 0.0;
     double raw_pitch = 0.0;
@@ -150,6 +191,8 @@ namespace aerial_robot_navigation
         BaseNavigator::joyStickControl(joy_msg);
         return;
       }
+
+    suppressBaseNavigatorModeSwitches(sanitized_raw);
 
     sensor_msgs::JoyConstPtr sanitized_msg(new sensor_msgs::Joy(sanitized_raw));
     BaseNavigator::joyStickControl(sanitized_msg);
@@ -233,6 +276,49 @@ namespace aerial_robot_navigation
       }
 
     if(publish_target_pose) root_target_pose_pub_.publish(target_pose);
+  }
+
+  bool DragonRootTargetNavigator::handleJointResetCombo(const sensor_msgs::Joy& joy_msg)
+  {
+    const sensor_msgs::Joy joy_cmd = joyParse(joy_msg);
+    if(joy_cmd.buttons.size() <= JOY_BUTTON_ACTION_CROSS)
+      {
+        root_target_joint_reset_combo_pressed_ = false;
+        return false;
+      }
+
+    const bool reset_combo_pressed = joy_cmd.buttons[JOY_BUTTON_CROSS_DOWN] == 1
+      && joy_cmd.buttons[JOY_BUTTON_ACTION_CROSS] == 1;
+    if(!reset_combo_pressed)
+      {
+        root_target_joint_reset_combo_pressed_ = false;
+        return false;
+      }
+
+    if(!root_target_joint_reset_combo_pressed_)
+      {
+        publishJointResetCommand();
+        root_target_joint_reset_combo_pressed_ = true;
+      }
+
+    return true;
+  }
+
+  void DragonRootTargetNavigator::publishJointResetCommand()
+  {
+    sensor_msgs::JointState joint_reset_msg;
+    joint_reset_msg.header.stamp = ros::Time::now();
+    joint_reset_msg.position = {
+      0.0,
+      M_PI / 2.0,
+      0.0,
+      M_PI / 2.0,
+      0.0,
+      M_PI / 2.0
+    };
+
+    root_target_joint_reset_pub_.publish(joint_reset_msg);
+    ROS_INFO("[DragonRootTargetNavigator] Published joint reset command from joystick combo.");
   }
 
   bool DragonRootTargetNavigator::normalizeRootTargetJoy(const sensor_msgs::Joy& joy_msg, sensor_msgs::Joy& sanitized_raw,

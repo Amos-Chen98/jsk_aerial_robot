@@ -21,6 +21,7 @@ namespace aerial_robot_navigation
 
   private:
     ros::Publisher root_target_pose_pub_;
+    ros::Publisher root_target_joint_reset_pub_;
     ros::Subscriber root_tail_pose_sub_;
 
     std::mutex root_target_mutex_;
@@ -29,6 +30,7 @@ namespace aerial_robot_navigation
     bool has_root_tail_pose_;
     bool root_target_initialized_;
     bool root_target_command_active_;
+    bool root_target_joint_reset_combo_pressed_;
     ros::Time last_root_target_command_stamp_;
     ros::Time last_supported_joy_stamp_;
 
@@ -54,6 +56,8 @@ namespace aerial_robot_navigation
     void joyStickControl(const sensor_msgs::JoyConstPtr& joy_msg) override;
     void rootTailPoseCallback(const geometry_msgs::PoseStampedConstPtr& msg);
 
+    bool handleJointResetCombo(const sensor_msgs::Joy& joy_msg);
+    void publishJointResetCommand();
     bool normalizeRootTargetJoy(const sensor_msgs::Joy& joy_msg, sensor_msgs::Joy& sanitized_raw,
                                 double& yaw, double& pitch, double& forward);
     double correctTriggerRaw(double raw_axis, int button, bool& initialized) const;
