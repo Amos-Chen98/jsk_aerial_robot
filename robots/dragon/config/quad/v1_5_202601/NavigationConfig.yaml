@@ -32,13 +32,13 @@ navigation:
   # desire tilt
   baselink_rot_pub_interval: 0.2
   baselink_rot_change_thresh: 0.04 # 0.2 sec (5 hz) -> 0.04; 0.1 sec (10 hz)-> 0.02; 0.05 sec (20 hz) -> 0.01
-  root_target_deadzone: 0.25
+  root_target_deadzone: 0.10
   root_target_trigger_init_epsilon: 0.05
   joy_reconnect_reset_du: 1.0
   root_target_forward_gain: 0.45
-  root_target_yaw_gain: 0.40
+  root_target_yaw_gain: 1.00
   root_target_pitch_gain: 0.35
   root_target_pitch_rate: 0.30
   root_target_forward_acc_limit: 0.25
-  root_target_yaw_acc_limit: 0.35
-  root_target_pitch_acc_limit: 0.25
+  root_target_yaw_acc_limit: 1.00
+  root_target_pitch_acc_limit: 0.50
