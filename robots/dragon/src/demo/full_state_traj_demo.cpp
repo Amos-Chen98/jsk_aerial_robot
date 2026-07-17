@@ -17,9 +17,9 @@ public:
     nh_.param("segment_time", segment_time_, 10.0);
     nh_.param("joint_num", joint_num_, 6);
     
-    // Initialize publishers and subscribers
+    // FullStateTarget is the sole command output. root/target_pose represents the
+    // first-link tail in FLU convention and must not mirror the root-link pose.
     full_state_target_pub_ = nh_.advertise<aerial_robot_msgs::FullStateTarget>("/dragon/full_state_target", 10);
-    root_target_pose_pub_ = nh_.advertise<geometry_msgs::PoseStamped>("/dragon/root/target_pose", 10);
     root_pose_sub_ = nh_.subscribe("/dragon/root/pose", 10, &FullStateTraj::rootPoseCallback, this);
     joint_state_sub_ = nh_.subscribe("/dragon/joint_states", 10, &FullStateTraj::jointStateCallback, this);
     
@@ -301,14 +301,7 @@ public:
     msg.joint_state.header.stamp = msg.header.stamp;
     
     full_state_target_pub_.publish(msg);
-    
-    // Publish root target pose
-    geometry_msgs::PoseStamped root_pose_msg;
-    root_pose_msg.header.stamp = msg.header.stamp;
-    root_pose_msg.header.frame_id = "world";
-    root_pose_msg.pose = msg.root_state.pose.pose;
-    root_target_pose_pub_.publish(root_pose_msg);
-    
+
     current_command_index_++;
   }
   
@@ -346,7 +339,6 @@ public:
 private:
   ros::NodeHandle nh_;
   ros::Publisher full_state_target_pub_;
-  ros::Publisher root_target_pose_pub_;
   ros::Subscriber root_pose_sub_;
   ros::Subscriber joint_state_sub_;
   ros::Timer publish_timer_;
