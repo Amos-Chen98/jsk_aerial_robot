@@ -98,6 +98,12 @@ class Start(BaseState):
 
                 interfere_flag = True
 
+        # This is BLT Joy Controller
+        if len(msg.axes) == 8 and len(msg.buttons) == 13:
+            if msg.buttons[4] == 1 and msg.buttons[5] == 1:
+
+                interfere_flag = True
+
         if interfere_flag:
             if not self.flags['interfere_mode']:
                 rospy.loginfo("Enter interfere mode")
@@ -111,7 +117,7 @@ class Start(BaseState):
         '\n\n  Please run following command to start the state machine: \n' + \
         '  "$ rostopic pub -1 /task_start std_msgs/Empty" \n \n' + \
         '  Or you can press "L1" and "R1" at the same time to enter interfere mode, \n' + \
-        '  which need to use controller like PS4 to manually proceed the state. \n'
+        '  using a supported controller (PS4, ROG, or BLT) to manually proceed the state. \n'
         rospy.loginfo('\033[32m'+ message +'\033[0m')
 
         userdata.flags = self.flags
