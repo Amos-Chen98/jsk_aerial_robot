@@ -90,7 +90,7 @@
       <collision>
         <origin rpy="${pi/2} 0 0" xyz="0 0 0.02"/>
         <geometry>
-          <cylinder length="0.3" radius="0.09" />
+          <cylinder length="0.40" radius="0.09" />
         </geometry>
       </collision>
 
