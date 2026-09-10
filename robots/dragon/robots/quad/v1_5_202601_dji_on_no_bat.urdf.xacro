@@ -38,5 +38,19 @@
     </inertial>
   </xacro:extra_module>
 
+  <!-- MID360 optical origin: the physical ray origin of the published clouds.
+       lidar_imu sits at (0.011, 0.02329, -0.04412) from here, which is the
+       MID360 IMU-to-optical extrinsic FAST-LIO carries as mapping/extrinsic_T. -->
+  <xacro:extra_module name = "lidar_origin" parent = "livox_mid360" visible = "0" >
+    <origin xyz="0 0 ${-0.02592 + 0.047}" rpy="0 0 0"/>
+    <inertial>
+      <origin xyz="0 0 0" rpy="0 0 0"/>
+      <mass value="0"/>
+      <inertia
+          ixx="0.0" iyy="0.0" izz="0.0"
+          ixy="0.0" ixz="0.0" iyz="0.0"/>
+    </inertial>
+  </xacro:extra_module>
+
 
 </robot>
